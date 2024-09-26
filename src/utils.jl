@@ -80,6 +80,7 @@ end
 
 @views function readimages(file::String; FTYPE=Float64)
     images = readfits(file, FTYPE=FTYPE)
+    images = repeat(images, 1, 1, 1, 1)
     nsubaps = size(images, 3);
     nepochs = size(images, 4);
     dim = size(images, 1);
@@ -132,15 +133,15 @@ function gaussian_kernel(dim, fwhm; FTYPE=Float64)
     return FTYPE.(k)
 end
 
-@views function shift_and_add(images, nsubaps, nepochs, pdim; FTYPE=Float64)
-    image_sum = zeros(FTYPE, pdim, pdim)
-    kernel = zeros(FTYPE, pdim, pdim)
+@views function shift_and_add(images, nsubaps, nepochs, dim; FTYPE=Float64)
+    image_sum = zeros(FTYPE, dim, dim)
+    kernel = zeros(FTYPE, dim, dim)
     for n=1:nsubaps
         for t=1:nepochs
             fill!(kernel, zero(FTYPE))
             center = Tuple(argmax(images[:, :, n, t]))
-            Δy, Δx = (pdim÷2)+1 - center[1], (pdim÷2)+1 - center[2]
-            shift = CartesianIndex((pdim÷2+1 + Δy, pdim÷2+1 + Δx))
+            Δy, Δx = (dim÷2)+1 - center[1], (dim÷2)+1 - center[2]
+            shift = CartesianIndex((dim÷2+1 + Δy, dim÷2+1 + Δx))
             kernel[shift] = 1.0
             image_sum .+= conv_psf(images[:, :, n, t], kernel)
         end
@@ -198,7 +199,6 @@ end
 
 function fit_plane(ϕ, mask)
     dim = size(ϕ, 1)
-    plane = zeros(dim, dim)
     ix = (mask .> 0)
     X = (collect(1:dim)' .* ones(dim))
     Y = X'
@@ -210,7 +210,7 @@ function fit_plane(ϕ, mask)
     ll = sqrt( fit[1]^2 + fit[2]^2 + 1 )
     a, b, c, d = -fit[1]/ll, -fit[2] / ll, 1 / ll, -fit[3] / ll
 
-    plane[ix] = -((a/c .* X[ix]) .+ (b/c .* Y[ix]) .+ (d/c))
+    plane = -((a/c .* X) .+ (b/c .* Y) .+ (d/c))
     return plane
 end
 
@@ -364,14 +364,25 @@ function setup_corr(dim; FTYPE=Float64)
     container1 = Matrix{Complex{FTYPE}}(undef, dim, dim)
     container2 = Matrix{Complex{FTYPE}}(undef, dim, dim)
     container3 = Matrix{Complex{FTYPE}}(undef, dim, dim)
-    function conv!(out, in1, in2)
+    function corr!(out, in1, in2)
         ft1(container1, in1)
         ft2(container2, in2)
         container3 .= container1 .* conj.(container2)
         ift1(out, container3)
     end
 
-    return conv!
+    return corr!
+end
+
+function setup_autocorr(dim; FTYPE=Float64)
+    ift1 = setup_ifft(dim, FTYPE=FTYPE)
+    container = Matrix{Complex{FTYPE}}(undef, dim, dim)
+    function autocorr!(out, in)
+        ift1(container, in)
+        out .= abs2.(container)
+    end
+
+    return autocorr!
 end
 
 function setup_operator_mul(dim; FTYPE=Float64)
@@ -382,4 +393,23 @@ function setup_operator_mul(dim; FTYPE=Float64)
     end
 
     return apply!
+end
+
+function calculate_ssim(x, y)
+    X = x; Y = y
+    # X = x .+ minimum(x); Y = y .+ minimum(y)
+    maxVal = max(maximum(X), maximum(Y))
+    X ./= maxVal; Y ./= maxVal
+
+    μx = mean(X); μy = mean(Y)
+    σx = std(X); σy = std(Y)
+    σxy = cov(vec(X), vec(Y))
+    
+    k1 = 0.01; k2 = 0.03
+    
+    l = (2*μx*μy + k1^2) / (μx^2 + μy^2 + k1^2)
+    c = (2*σx*σy + k2^2) / (σx^2 + σy^2 + k2^2)
+    s = (σxy + k2^2/4) / (σx*σy + k2^2/4)
+    ssim = l * c * s
+    return ssim
 end

@@ -1,26 +1,24 @@
 include("../src/mfbd.jl")
 using Main.MFBD
 
-for θ in [2, 4, 6, 8, 10, 15, 20]
-using Statistics
 ############# Data Parameters #############
 FTYPE = Float32;
-folder = "/home/dan/Desktop/ApJL_2024/separations/recon/Delta_mag5"
-id = "_$(round(Int, θ))arcsec"
-verb = true
+folder = "/home/dan/Desktop/JASS_2024/prime-95b/monte_carlo";
+# folder = "data/test"
+id = "_1"
 ###########################################
 
 ##### Size, Timestep, and Wavelengths #####
-image_dim = 256
+image_dim = 512
 wfs_dim = 64
 
 nsubaps_side = 6
-nepochs = 33
-nλ = 1
-λ_nyquist = 500.0
+nepochs = 11
+nλ = 10
+λ_nyquist = 400.0
 λ_ref = 500.0
-λmin = 500.0
-λmax = 500.0
+λmin = 400.0
+λmax = 1000.0
 λ = collect(range(λmin, stop=λmax, length=nλ))
 Δλ = (nλ == 1) ? 1.0 : (λmax - λmin) / (nλ - 1)
 
@@ -39,27 +37,14 @@ masks_full = Masks(
 )
 maskfile = "$(folder)/ish_subaps_1x1$(id).fits"
 # writefits(masks_full.masks, maskfile, header=header)
-masks_wfs = Masks(
-    dim=image_dim,
-    nsubaps_side=nsubaps_side, 
-    λ=λ, 
-    λ_nyquist=λ_nyquist, 
-    FTYPE=FTYPE
-)
-nsubaps = masks_wfs.nsubaps
-masks_wfs.scale_psfs = masks_full.scale_psfs
-maskfile = "$(folder)/ish_subaps_$(nsubaps_side)x$(nsubaps_side)$(id).fits"
-# writefits(masks_wfs.masks, maskfile, header=header)
-masks = [masks_full, masks_wfs]
+masks = [masks_full]
 ###########################################
 
 ### Detector & Observations Parameters ####
 D = 3.6  # m
-# fov = 20 * 256 / (132 * (256 / 512))
-fov = 256 / 78.5 * θ
-# fov = 10.0
+fov = 8.0
 pixscale_full = fov / image_dim
-pixscale_wfs = pixscale_full * nsubaps_side
+# pixscale_wfs = pixscale_full .* nsubaps_side
 qefile = "data/qe/prime-95b_qe.dat"
 ~, qe = readqe(qefile, λ=λ)
 # qe = ones(FTYPE, nλ)
@@ -67,8 +52,8 @@ rn = 2.0
 exptime = 5e-3
 noise = true
 ζ = 0.0
+########## Create Optical System ##########
 ######### Create Full-Ap Detector #########
-filter = Filter(filtername="Bessell:V", FTYPE=FTYPE)
 detector_full = Detector(
     qe=qe,
     rn=rn,
@@ -76,7 +61,7 @@ detector_full = Detector(
     λ=λ,
     λ_nyquist=λ_nyquist,
     exptime=exptime,
-    filter=filter,
+    filter=Filter(filtername="broadband", λ=λ, FTYPE=FTYPE),
     FTYPE=FTYPE
 )
 ### Create Full-Ap Observations object ####
@@ -86,43 +71,26 @@ observations_full = Observations(
     D=D,
     nepochs=nepochs,
     nsubaps=1,
+    α=1.0,
     dim=image_dim,
-    α=0.5,
     FTYPE=FTYPE
 )
-detector_wfs = Detector(
-    qe=qe,
-    rn=rn,
-    pixscale=pixscale_wfs,
-    λ=λ,
-    λ_nyquist=λ_nyquist,
-    exptime=exptime,
-    filter=filter,
-    FTYPE=FTYPE
-)
-observations_wfs = Observations(
-    detector_wfs,
-    ζ=ζ,
-    D=D,
-    nepochs=nepochs,
-    nsubaps=masks_wfs.nsubaps,
-    dim=wfs_dim,
-    α=0.5,
-    FTYPE=FTYPE
-)
-observations = [observations_full, observations_wfs]
+observations = [observations_full]
 ###########################################
 
 ############ Object Parameters ############
-objectfile = "data/binary_tight.fits"
+objectfile = "data/sat_template2.fits"
 ~, spectrum = solar_spectrum(λ=λ)
 # spectrum = ones(FTYPE, nλ)
-template = false
-mag = 4# 1.17
-background_mag = FTYPE(Inf)
-flux = mag2flux(λ, spectrum, mag, observations_full.detector, D=D, ζ=ζ, exptime=exptime)
-background_flux = mag2flux(λ, ones(nλ), background_mag, observations_full.detector, D=D, ζ=ζ, exptime=exptime)
-object_height = FTYPE(Inf)# 1.434e6  # km
+template = true
+mag = 4.0
+# background_mag = FTYPE(Inf)
+flux = mag2flux(λ, spectrum, mag, detector_full, D=D, ζ=ζ, exptime=exptime)
+# background_flux = mag2flux(λ, ones(nλ), background_mag, observations_full.detector, D=D, ζ=ζ, exptime=exptime)
+background_flux = 0.0
+object_height = 515.0  # km
+# object_size = 13.0  # m
+# fov = 206265 * object_size / (object_height*1e3)
 ############## Create object ##############
 object = Object(
     flux=flux,
@@ -137,13 +105,11 @@ object = Object(
     template=template,
     FTYPE=FTYPE
 )
-object.object[findall(object.object .!= 0)[2]] *= 1e-2
-object.object .*= flux / sum(object.object)
-writefits(object.object, "$(folder)/object_truth.fits", header=header)
+# writefits(object.object, "$(folder)/hyperspectral_sat.fits", header=header)
 ###########################################
 
 ########## Anisopatch Parameters ##########
-isoplanatic = false
+isoplanatic = true
 patch_overlap = 0.5
 patch_dim = 64
 ###### Create Anisoplanatic Patches #######
@@ -163,9 +129,10 @@ wind = [wind_speed wind_direction]
 nlayers = length(heights)
 propagate = false
 r0 = (r0_composite / nlayers^(-3/5)) .* ones(nlayers)  # m
-seeds = rand(1:10000, 3)#[713, 1212, 525118]
-sampling_nyquist_mperpix = layer_nyquist_sampling_mperpix(D, image_dim, nlayers)
-sampling_nyquist_arcsecperpix = layer_nyquist_sampling_arcsecperpix(D, fov, heights, image_dim)
+seeds = [713, 1212, 525118]
+Dmeta = D .+ (fov/206265) .* (heights .* 1000)
+sampling_nyquist_mperpix = (2*D / image_dim) .* ones(nlayers)
+sampling_nyquist_arcsecperpix = (fov / image_dim) .* (D ./ Dmeta)
 ############ Create Atmosphere ############
 atmosphere = Atmosphere(
     l0=l0,
@@ -182,33 +149,30 @@ atmosphere = Atmosphere(
     FTYPE=FTYPE
 )
 ########## Create phase screens ###########
-calculate_screen_size!(atmosphere, observations_full, object, patches, verb=verb)
-calculate_pupil_positions!(atmosphere, observations_full, verb=verb)
-calculate_layer_masks_eff!(patches, atmosphere, observations_full, object, masks_full, verb=verb)
+calculate_screen_size!(atmosphere, observations_full, object, patches)
+calculate_pupil_positions!(atmosphere, observations_full)
+calculate_layer_masks_eff_alt!(atmosphere, observations[end], object, masks[end])
 create_phase_screens!(atmosphere, observations_full)
+opd_smooth = calculate_smoothed_opd(atmosphere, observations_full, 0.35)
+calculate_composite_pupil_eff(patches, atmosphere, observations, object, masks, build_dim=image_dim, propagate=propagate)
 atmosphere.opd .*= atmosphere.masks[:, :, :, 1]
 
-# opd_smooth = calculate_smoothed_opd(atmosphere, observations_full)
-calculate_composite_pupil_eff(patches, atmosphere, observations, object, masks, build_dim=image_dim, propagate=propagate)
-writefits(atmosphere.masks, "$(folder)/layer_masks$(id).fits", header=header)
+# writefits(atmosphere.masks, "$(folder)/layer_masks.fits", header=header)
 # writefits(observations_full.A, "$(folder)/Dr0_$(Dr0_composite)_ISH1x1_amplitude$(id).fits")
 # writefits(observations_wfs.A, "$(folder)/Dr0_$(Dr0_composite)_ISH$(nsubaps_side)x$(nsubaps_side)_amplitude$(id).fits")
 # writefits(atmosphere.ϕ, "$(folder)/Dr0_$(Dr0_composite)_phase_full$(id).fits", header=header)
-# writefits(patches.ϕ_slices, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_phase_slices$(id).fits", header=header)
-# writefits(patches.ϕ_composite, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_phase_composite$(id).fits", header=header)
+# writefits(patches.ϕ_slices, "$(folder)/Dr0_$(Dr0_composite)_phase_slices$(id).fits", header=header)
+# writefits(patches.ϕ_composite, "$(folder)/Dr0_$(Dr0_composite)_phase_composite$(id).fits", header=header)
 writefits(atmosphere.opd, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full$(id).fits")
-# writefits(opd_smooth, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full_smooth$(id).fits")
+writefits(opd_smooth, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full_smooth$(id).fits")
 ###########################################
 
 ########## Create Full-Ap images ##########
 create_images_eff(patches, observations, atmosphere, masks, object, build_dim=image_dim, noise=noise)
 outfile = "$(folder)/Dr0_$(round(Int64, Dr0_composite))_ISH1x1_images$(id).fits"
 writefits(observations_full.images, outfile, header=header)
-outfile = "$(folder)/Dr0_$(round(Int64, Dr0_composite))_ISH$(nsubaps_side)x$(nsubaps_side)_images$(id).fits"
-writefits(observations_wfs.images, outfile, header=header)
 # outfile = "$(folder)/Dr0_$(round(Int64, Dr0_composite))_ISH1x1_monochromatic_images$(id).fits"
 # writefits(observations_full.monochromatic_images, outfile, header=header)
 # outfile = "$(folder)/Dr0_$(round(Int64, Dr0_composite))_ISH1x1_psfs$(id).fits"
 # writefits(patches.psfs[1], outfile, header=header)
 ###########################################
-end

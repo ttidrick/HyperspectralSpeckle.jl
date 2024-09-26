@@ -83,11 +83,14 @@ end
     return subaperture_masks
 end
 
-@views function make_ish_masks(dim, nsubaps_side, λ::Vector{<:AbstractFloat}; λ_nyquist=400.0, FTYPE=Float64)
+@views function make_ish_masks(dim, nsubaps_side, λ::Vector{<:AbstractFloat}; λ_nyquist=400.0, verb=true, FTYPE=Float64)
+    if verb == true
+        println("Creating $(dim)×$(dim) mask for $(nsubaps_side)×$(nsubaps_side) subapertures between $(minimum(λ))—$(maximum(λ)) nm at $(length(λ)) wavelengths")
+    end
     nλ = length(λ)
     subaperture_masks = Array{FTYPE, 4}(undef, dim, dim, nsubaps_side^2, nλ)
     Threads.@threads :static for w=1:nλ
-        subaperture_masks[:, :, :, w] .= make_ish_masks(dim, nsubaps_side, λ[w], λ_nyquist=λ_nyquist, FTYPE=FTYPE)
+        subaperture_masks[:, :, :, w] .= make_ish_masks(dim, nsubaps_side, λ[w], λ_nyquist=λ_nyquist, verb=~verb, FTYPE=FTYPE)
     end
 
     subap_flux = (((dim÷2) * λ_nyquist/λ[1]) / nsubaps_side)^2

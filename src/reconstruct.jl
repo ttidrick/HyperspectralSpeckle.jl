@@ -1,22 +1,49 @@
 using FFTW
-FFTW.set_num_threads(1)
 using Statistics
 using FourierTools
 using LinearAlgebra
 using OptimPackNextGen
 
 
+if Threads.nthreads() == 1
+    FFTW.set_num_threads(4)
+else
+    FFTW.set_num_threads(1)
+end
+
+function ConstantSchedule()
+    function constant(x)
+        return x
+    end
+
+    return constant
+end
+
+function ReciprocalDecaySchedule(maxval, niters, minval)
+    function reciprocal(x)
+        return max(maxval * (1 - (x-1)/niters), minval)
+    end
+
+    return reciprocal
+end
+
 mutable struct Helpers{T<:AbstractFloat}
     extractor::Array{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}, 4}
     extractor_adj::Array{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}, 4}
-    # extractor_adj::Array{LazyAlgebra.Adjoint{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}}, 4}
     refraction::Matrix{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}}
-    refraction_adj::Matrix{LazyAlgebra.Adjoint{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}}}
+    refraction_adj::Matrix{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}}
     ift::Vector{Function}
-    W_smooth::Array{T, 3}
+    convolve::Vector{Function}
+    correlate::Vector{Function}
+    autocorr::Vector{Function}
     ϕ_full::Array{T, 3}
     ϕ_slice::Array{T, 3}
     ϕ_composite::Array{T, 3}
+    o_conv::Array{Function, 3}
+    o_corr::Array{Function, 3}
+    smoothing_kernel::Matrix{T}
+    k_conv::Vector{Function}
+    k_corr::Vector{Function}
     P::Array{Complex{T}, 4}
     p::Array{Complex{T}, 4}
     c::Array{T, 3}
@@ -26,8 +53,8 @@ mutable struct Helpers{T<:AbstractFloat}
     Î_small::Vector{Array{T, 3}}
     r::Vector{Array{T, 3}}
     ω::Vector{Array{T, 3}}
+    M::Vector{Matrix{T}}
     ϵ_threads::Vector{T}
-    g_threads_ϕ::Array{T, 5}
     g_threads_obj::Array{T, 4}
     g_threads_opd::Array{T, 4}
     containers_builddim_real::Array{T, 3}
@@ -36,63 +63,80 @@ mutable struct Helpers{T<:AbstractFloat}
     containers_sdim_cplx::Array{T, 3}
     containers_pdim_real::Vector{Array{T, 3}}
     containers_pdim_cplx::Vector{Array{Complex{T}, 3}}
-    @views function Helpers(atmosphere,
+    function Helpers(atmosphere,
                      observations,
-                     object;
+                     object,
+                     patches;
+                     λtotal=atmosphere.λ,
                      build_dim=size(object.object, 1),
                      ndatasets=length(observations),
                      verb=true,
                      FTYPE=gettype(atmosphere))
         if verb == true
-            println("Setting up interpolators, buffers, fft/ifft plans, convolution/correlation plans")
+            println(" |-> Creating fft/ifft plans and convolution/correlation plans")
         end
-        nλ = atmosphere.nλ
-
+        nλtotal = length(λtotal)
         ifft_threads = [setup_ifft(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
-        extractor = Array{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}, 4}(undef, ndatasets, observations[1].nepochs, atmosphere.nlayers, nλ)
-        extractor_adj = Array{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}, 4}(undef, ndatasets, observations[1].nepochs, atmosphere.nlayers, nλ)
-        # extractor_adj = Array{LazyAlgebra.Adjoint{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}}, 4}(undef, ndatasets, observations[1].nepochs, atmosphere.nlayers, nλ)
-        refraction = Matrix{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}}(undef, ndatasets, nλ)
-        refraction_adj = Matrix{LazyAlgebra.Adjoint{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}}}(undef, ndatasets, nλ)
-        
+        conv_threads = [setup_conv(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+        corr_threads = [setup_corr(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+        autocorr_threads = [setup_autocorr(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+
         nthreads = Threads.nthreads()
+        if verb == true
+            println(" |-> Creating computation buffers for $(nthreads) threads")
+        end
         ϵ_threads = zeros(FTYPE, nthreads)
-        g_threads_ϕ = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, atmosphere.nλ, nthreads)
         g_threads_opd = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, nthreads)
-        g_threads_obj = zeros(FTYPE, build_dim, build_dim, nλ, nthreads)
-        W_smooth = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers)
+        g_threads_obj = zeros(FTYPE, build_dim, build_dim, object.nλ, nthreads)
         ϕ_full = zeros(FTYPE, atmosphere.dim, atmosphere.dim, nthreads)
         ϕ_slice = Array{FTYPE, 3}(undef, build_dim, build_dim, nthreads)
-        ϕ_composite = Array{FTYPE, 3}(undef, build_dim, build_dim, nthreads)
-        P = Array{Complex{FTYPE}, 4}(undef, build_dim, build_dim, nλ, nthreads)
-        p = Array{Complex{FTYPE}, 4}(undef, build_dim, build_dim, nλ, nthreads)
-        Î_big = Array{FTYPE, 3}(undef, build_dim, build_dim, nthreads)
-        c = Array{FTYPE, 3}(undef, build_dim, build_dim, nthreads)
-        d = Array{Complex{FTYPE}, 3}(undef, build_dim, build_dim, nthreads)
-        d2 = Array{FTYPE, 3}(undef, build_dim, build_dim, nthreads)
-        containers_builddim_cplx = Array{Complex{FTYPE}, 3}(undef, build_dim, build_dim, nthreads)
-        containers_builddim_real = Array{FTYPE, 3}(undef, build_dim, build_dim, nthreads)
-        containers_sdim_real = Array{FTYPE, 3}(undef, atmosphere.dim, atmosphere.dim, nthreads)
-        containers_sdim_cplx = Array{Complex{FTYPE}, 3}(undef, atmosphere.dim, atmosphere.dim, nthreads)
-
+        ϕ_composite = zeros(FTYPE, build_dim, build_dim, nthreads)
+        o_conv = Array{Function, 3}(undef, object.nλ, patches.npatches, nthreads)
+        o_corr = Array{Function, 3}(undef, object.nλ, patches.npatches, nthreads)
+        smoothing_kernel = zeros(FTYPE, build_dim, build_dim)
+        k_conv = Vector{Function}(undef, nthreads)
+        k_corr = Vector{Function}(undef, nthreads)
+        P = zeros(Complex{FTYPE}, build_dim, build_dim, nλtotal, nthreads)
+        p = zeros(Complex{FTYPE}, build_dim, build_dim, nλtotal, nthreads)
+        Î_big = zeros(FTYPE, build_dim, build_dim, nthreads)
+        c = zeros(FTYPE, build_dim, build_dim, nthreads)
+        d = zeros(Complex{FTYPE}, build_dim, build_dim, nthreads)
+        d2 = zeros(FTYPE, build_dim, build_dim, nthreads)
+        containers_builddim_cplx = zeros(Complex{FTYPE}, build_dim, build_dim, nthreads)
+        containers_builddim_real = zeros(FTYPE, build_dim, build_dim, nthreads)
+        containers_sdim_real = zeros(FTYPE, atmosphere.dim, atmosphere.dim, nthreads)
+        containers_sdim_cplx = zeros(Complex{FTYPE}, atmosphere.dim, atmosphere.dim, nthreads)
         ndatasets = length(observations)
         r = Vector{Array{FTYPE, 3}}(undef, ndatasets)
         ω = Vector{Array{FTYPE, 3}}(undef, ndatasets)
+        M = Vector{Matrix{FTYPE}}(undef, ndatasets)
         Î_small = Vector{Array{FTYPE, 3}}(undef, ndatasets)
         containers_pdim_real = Vector{Array{FTYPE, 3}}(undef, ndatasets)
         containers_pdim_cplx = Vector{Array{Complex{FTYPE}, 3}}(undef, ndatasets)
-        
-        Threads.@threads :static for dd=1:ndatasets
-            r[dd] = Array{FTYPE, 3}(undef, observations[dd].dim, observations[dd].dim, nthreads)
-            ω[dd] = Array{FTYPE, 3}(undef, observations[dd].dim, observations[dd].dim, nthreads)
-            Î_small[dd] = Array{FTYPE, 3}(undef, observations[dd].dim, observations[dd].dim, nthreads)
-            containers_pdim_real[dd] = Array{FTYPE, 3}(undef, observations[dd].dim, observations[dd].dim, nthreads)
-            containers_pdim_cplx[dd] = Array{Complex{FTYPE}, 3}(undef, observations[dd].dim, observations[dd].dim, nthreads)
-            scaleby_wavelength = [observations[dd].detector.λ_nyquist/atmosphere.λ[w] for w=1:atmosphere.nλ]
-            scaleby_height = 1 .- atmosphere.heights ./ object.height
-            for w=1:nλ
-                refraction[dd, w] = create_refraction_operator(atmosphere.λ[w], atmosphere.λ_ref, observations[dd].ζ, observations[dd].detector.pixscale[w], build_dim, FTYPE=FTYPE)
-                refraction_adj[dd, w] = refraction[dd, w]'
+
+        if verb == true
+            println(" |-> Creating punch-out and refraction interpolators/adjoints")
+        end
+        extractor = Array{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}, 4}(undef, ndatasets, observations[1].nepochs, atmosphere.nlayers, nλtotal)
+        extractor_adj = Array{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}, 4}(undef, ndatasets, observations[1].nepochs, atmosphere.nlayers, nλtotal)
+        refraction = Matrix{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}}(undef, ndatasets, nλtotal)
+        refraction_adj = Matrix{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}}(undef, ndatasets, nλtotal)
+        for dd=1:ndatasets
+            r[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
+            ω[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
+            M[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim)
+            M[dd][observations[dd].dim÷2+1, observations[dd].dim÷2+1] = 1
+            Î_small[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
+            containers_pdim_real[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
+            containers_pdim_cplx[dd] = zeros(Complex{FTYPE}, observations[dd].dim, observations[dd].dim, nthreads)
+            scaleby_wavelength = [observations[dd].detector.λ_nyquist / λtotal[w] for w=1:nλtotal]
+            # scaleby_height = 1 .- atmosphere.heights ./ object.height
+            scaleby_height = layer_scale_factors(atmosphere.heights, object.height)
+            # Dmeta = observations[dd].D .+ (object.fov/206265) .* (atmosphere.heights .* 1000)
+            # scaleby_height = Dmeta ./ observations[dd].D
+            Threads.@threads for w=1:nλtotal
+                refraction[dd, w] = create_refraction_operator(λtotal[w], atmosphere.λ_ref, observations[dd].ζ, observations[dd].detector.pixscale, build_dim, FTYPE=FTYPE)
+                refraction_adj[dd, w] = create_refraction_adjoint(λtotal[w], atmosphere.λ_ref, observations[dd].ζ, observations[dd].detector.pixscale, build_dim, FTYPE=FTYPE)
                 for l=1:atmosphere.nlayers
                     for t=1:observations[dd].nepochs
                         extractor[dd, t, l, w] = create_extractor_operator(atmosphere.positions[:, t, l, w], atmosphere.dim, build_dim, scaleby_height[l], scaleby_wavelength[w], FTYPE=FTYPE)
@@ -102,7 +146,7 @@ mutable struct Helpers{T<:AbstractFloat}
             end
         end
 
-        return new{FTYPE}(extractor, extractor_adj, refraction, refraction_adj, ifft_threads, W_smooth, ϕ_full, ϕ_slice, ϕ_composite, P, p, c, d, d2, Î_big, Î_small, r, ω, ϵ_threads, g_threads_ϕ, g_threads_obj, g_threads_opd, containers_builddim_real, containers_builddim_cplx, containers_sdim_real, containers_sdim_cplx, containers_pdim_real, containers_pdim_cplx)
+        return new{FTYPE}(extractor, extractor_adj, refraction, refraction_adj, ifft_threads, conv_threads, corr_threads, autocorr_threads, ϕ_full, ϕ_slice, ϕ_composite, o_conv, o_corr, smoothing_kernel, k_conv, k_corr, P, p, c, d, d2, Î_big, Î_small, r, ω, M, ϵ_threads, g_threads_obj, g_threads_opd, containers_builddim_real, containers_builddim_cplx, containers_sdim_real, containers_sdim_cplx, containers_pdim_real, containers_pdim_cplx)
     end
 end
 
@@ -111,14 +155,16 @@ mutable struct PatchHelpers{T<:AbstractFloat}
     extractor_adj::Array{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}, 4}
     P::Array{Complex{T}, 5}
     p::Array{Complex{T}, 5}
-    @views function PatchHelpers(patches, observations, atmosphere, object; build_dim=size(object.object, 1), FTYPE=gettype(atmosphere))
-        nλ = atmosphere.nλ
-        P = zeros(Complex{FTYPE}, build_dim, build_dim, patches.npatches, nλ, Threads.nthreads())
-        p = zeros(Complex{FTYPE}, build_dim, build_dim, patches.npatches, nλ, Threads.nthreads())
-
-        Dmeta = observations[end].D .+ (object.fov/206265) .* (atmosphere.heights .* 1000)
-        scaleby_wavelength = atmosphere.λ_nyquist ./ atmosphere.λ
-        scaleby_height = Dmeta ./ observations[end].D
+    function PatchHelpers(patches, observations, atmosphere, object; λtotal=atmosphere.λ, build_dim=size(object.object, 1), verb=true, FTYPE=gettype(atmosphere))
+        if verb == true
+            println(" |-> Creating patch extractors and buffers")
+        end
+        nλtotal = length(λtotal)
+        P = zeros(Complex{FTYPE}, build_dim, build_dim, patches.npatches, nλtotal, Threads.nthreads())
+        p = zeros(Complex{FTYPE}, build_dim, build_dim, patches.npatches, nλtotal, Threads.nthreads())
+        
+        scaleby_wavelength = atmosphere.λ_nyquist ./ λtotal
+        scaleby_height = layer_scale_factors(atmosphere.heights, object.height)
         extractor = create_patch_extractors(patches, atmosphere, observations[end], object, scaleby_wavelength, scaleby_height)
         extractor_adj = create_patch_extractors_adjoint(patches, atmosphere, observations[end], object, scaleby_wavelength, scaleby_height)
         return new{FTYPE}(extractor, extractor_adj, P, p)
@@ -127,63 +173,89 @@ end
 
 mutable struct Reconstruction{T<:AbstractFloat}
     λ::Vector{T}
+    λtotal::Vector{T}
     nλ::Int64
+    nλint::Int64
+    nλtotal::Int64
     Δλ::T
+    Δλtotal::T
     ndatasets::Int64
     build_dim::Int64
+    weight_function::Function
+    gradient_object::Function
+    gradient_opd::Function
     niter_mfbd::Int64
     indx_boot::Vector{UnitRange{Int64}}
     niter_boot::Int64
     maxiter::Int64
-    ϵ::Vector{T}
-    gtol::Tuple{T, T}
-    xtol::Tuple{T, T}
-    ftol::Tuple{T, T}
+    ϵ::T
+    grtol::T
+    frtol::T
+    xrtol::T
+    maxeval::Dict{String, Int64}
     regularizers::Regularizers{T}
     smoothing::Bool
     fwhm_schedule::Function
     helpers::Helpers{T}
     patch_helpers::PatchHelpers{T}
+    verb_levels::Dict{String, Bool}
+    plot::Bool
+    figures::ReconstructionFigures
     function Reconstruction(
             atmosphere,
             observations,
             object,
             patches;
-            λ=atmosphere.λ,
+            λmin=400.0,
+            λmax=1000.0,
+            nλ=1,
+            nλint=1,
             ndatasets=length(observations),
             build_dim=size(object.object, 1),
+            weight_function=gaussian_weighting,
+            gradient_object=gradient_object_gaussiannoise!,
+            gradient_opd=gradient_opd_gaussiannoise!,
             niter_mfbd=10,
             indx_boot=[1:dd for dd=1:ndatasets],
             maxiter=10,
-            gtol=(0.0, 1e-9),
-            xtol=(0.0, 1e-9),
-            ftol=(0.0, 1e-9),
+            maxeval=Dict("object"=>100000, "opd"=>100000),
+            grtol=1e-9,
+            frtol=1e-9,
+            xrtol=1e-9,
             smoothing=false,
-            fwhm_schedule=x -> max(10 * (1 - x/niter_mfbd), 1.0),
+            maxFWHM=10.0,
+            minFWHM=0.1,
+            fwhm_schedule=ReciprocalDecaySchedule(maxFWHM, niter_mfbd, minFWHM),
             regularizers=[],
             helpers=[],
             patch_helpers=[],
             verb=true,
+            mfbd_verb_level="full",
+            plot=true,
             FTYPE = gettype(atmosphere)
         )
-        nλ = length(λ)
-        Δλ = (nλ == 1) ? 1.0 : (maximum(λ) - minimum(λ)) / (nλ - 1)
-
+        nλtotal = nλ * nλint
+        λ = (nλ == 1) ? [mean([λmax, λmin])] : collect(range(λmin, stop=λmax, length=nλ))
+        λtotal = (nλtotal == 1) ? [mean([λmax, λmin])] : collect(range(λmin, stop=λmax, length=nλtotal))
+        Δλ = (nλ == 1) ? 1.0 : (λmax - λmin) / (nλ - 1)
+        Δλtotal = (nλtotal == 1) ? 1.0 : (λmax - λmin) / (nλtotal - 1)
         niter_boot = length(indx_boot)
-        ϵ = zeros(FTYPE, niter_mfbd)
+        ϵ = zero(FTYPE)
         if verb == true
-            println("Setting up MFBD: $(nλ) wavelengths, $(niter_mfbd) iterations, $(ndatasets) aperture diverse channels")
-        end
-
-        if regularizers == []
-            regularizers = Regularizers(FTYPE=FTYPE)
+            println("Setting up MFBD: $(nλ) wavelengths ($(nλint) integrated planes), $(niter_mfbd) iterations, $(ndatasets) data channels")
+            println(" |-> Noise weighting: $(weight_function), object gradient: $(gradient_object), opd gradient: $(gradient_opd)")
+            println(" |-> Max iterations: $(maxiter), Max evaluations (OPD): $(maxeval["opd"]), (object): $(maxeval["object"])")
+            println(" |-> Smoothing: $(smoothing) (schedule: $(fwhm_schedule), Max FWHM: $(maxFWHM), Min FWHM: $(minFWHM))")
         end
 
         if helpers == []
             helpers = Helpers(
                 atmosphere, 
                 observations,
-                object
+                object,
+                patches,
+                λtotal=λtotal,
+                verb=verb
             );
         end
 
@@ -192,234 +264,145 @@ mutable struct Reconstruction{T<:AbstractFloat}
                 patches,
                 observations,
                 atmosphere,
-                object
+                object,
+                λtotal=λtotal,
+                verb=verb
             )
         end
 
-        return new{FTYPE}(λ, nλ, Δλ, ndatasets, build_dim, niter_mfbd, indx_boot, niter_boot, maxiter, ϵ, gtol, xtol, ftol, regularizers, smoothing, fwhm_schedule, helpers, patch_helpers)
-    end
-end
-
-@views function object_solve!(reconstruction, observations, object, patches; verb="mfbd", plot=false)
-    FTYPE = gettype(reconstruction)
-    if verb == "full"
-        vm = true
-        vo = true
-    elseif verb == "mfbd"
-        vm = true
-        vo = false
-    elseif verb == "silent"
-        vm = false
-        vo = false
-    end
-
-    if plot == true
-        ## Plots the object and both phase layers
-        fig = Figure(size=(600, 600))
-        o_ax = Axis(fig[1, 1])
-        o_ax.title = "Object (mean)"
-        hidedecorations!(o_ax)
-        o_ax.aspect = DataAspect()
-        global o_obs = Observable(rotr90(dropdims(mean(object.object, dims=3), dims=3)))
-        o_plt = plot!(o_ax, o_obs, colormap=Reverse(:Greys))
-        Colorbar(fig[1, 2], o_plt, width=10, height=Relative(1))
-        trim!(fig.layout)
-        display(fig)
-    end
-    fill!(reconstruction.ϵ, zero(FTYPE))    
-    
-    crit_obj = (x, g) -> fg_object(x, g, observations, reconstruction, patches)
-    vmlmb!(crit_obj, object.object, lower=0, verb=vo, mem=5, maxiter=reconstruction.maxiter, gtol=reconstruction.gtol, xtol=reconstruction.xtol, ftol=reconstruction.ftol, fmin=0)
-    GC.gc()
-    
-    reconstruction.ϵ[1] = fg_object(object.object, similar(object.object), observations, reconstruction, patches)
-end
-
-@views function opd_solve!(reconstruction, observations, atmosphere, object, masks, patches; verb="mfbd", plot=false)
-    FTYPE = gettype(reconstruction)
-    if verb == "full"
-        vm = true
-        vo = true
-    elseif verb == "mfbd"
-        vm = true
-        vo = false
-    elseif verb == "silent"
-        vm = false
-        vo = false
-    end
-
-    if plot == true
-        ## Plots the object and both phase layers
-        fig = Figure(size=(600*atmosphere.nlayers, 600))
-        l_ax = [Axis(fig[1, 2*l]) for l=1:atmosphere.nlayers]
-        [l_ax[l].title = "Layer $(l) - OPD [nm]" for l=1:atmosphere.nlayers]
-        [hidedecorations!(ax) for ax in l_ax]
-        [ax.aspect = DataAspect() for ax in l_ax]
-        global l_obs = [Observable(rotr90(atmosphere.opd[:, :, l].*atmosphere.masks[:, :, l, 1])) for l=1:atmosphere.nlayers]
-        l_plt = [plot!(l_ax[l], l_obs[l], colormap=Reverse(:Greys)) for l=1:atmosphere.nlayers]
-        [Colorbar(fig[1, 2*l+1], l_plt[l], width=10, height=Relative(2/4)) for l=1:atmosphere.nlayers]
-        trim!(fig.layout)
-        display(fig)
-    end
-
-    nthreads = Threads.nthreads()
-    k = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim)
-    k_conv = Vector{typeof(plan_conv_psf_buffer(k, k)[2])}(undef, nthreads)
-    k_corr = Vector{typeof(plan_ccorr_psf_buffer(k, k)[2])}(undef, nthreads)
-    o_conv = Array{typeof(plan_conv_psf_buffer(k, k)[2]), 3}(undef, reconstruction.nλ, patches.npatches, nthreads)
-    o_corr = Array{typeof(plan_ccorr_psf_buffer(k, k)[2]), 3}(undef, reconstruction.nλ, patches.npatches, nthreads)
-    patches.psfs = Vector{Array{FTYPE, 6}}(undef, reconstruction.ndatasets)
-    for dd=1:reconstruction.ndatasets
-        patches.psfs[dd] = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs, reconstruction.nλ)
-        observations[dd].psfs = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, observations[dd].nsubaps, observations[dd].nepochs, reconstruction.nλ)
-        observations[dd].model_images = zeros(FTYPE, observations[dd].dim, observations[dd].dim, observations[dd].nsubaps, observations[dd].nepochs)
-    end
-
-    ## Perform MFBD iterations  
-    fill!(reconstruction.ϵ, zero(FTYPE))
-
-    k .= gaussian_kernel(reconstruction.build_dim, 0.5, FTYPE=FTYPE)
-    for tid=1:nthreads
-        k_conv[tid] = plan_conv_psf_buffer(k, k)[2]
-        k_corr[tid] = plan_ccorr_psf_buffer(k, k)[2]
-    end
-    
-    for w=1:reconstruction.nλ
-        for np=1:patches.npatches
-            for tid=1:nthreads
-                o_conv[w, np, tid] = plan_conv_psf_buffer(object.object[:, :, w], patches.w[:, :, np] .* object.object[:, :, w])[2]
-                o_corr[w, np, tid] = plan_ccorr_psf_buffer(object.object[:, :, w], patches.w[:, :, np] .* object.object[:, :, w])[2]
-            end
+        if regularizers == []
+            regularizers = Regularizers(verb=verb, FTYPE=FTYPE)
         end
+
+        patches.A = Vector{Array{FTYPE, 6}}(undef, ndatasets)
+        patches.ϕ_slices = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[1].nepochs, atmosphere.nlayers, nλtotal)
+        patches.ϕ_composite = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[1].nepochs, nλtotal)
+        patches.psfs = Vector{Array{FTYPE, 6}}(undef, ndatasets)
+        patches.broadband_psfs = Vector{Array{FTYPE, 5}}(undef, ndatasets)
+        for dd=1:ndatasets
+            patches.A[dd] = ones(FTYPE, build_dim, build_dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs, nλtotal)
+            patches.psfs[dd] = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs, nλ)
+            patches.broadband_psfs[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs)
+            observations[dd].psfs = zeros(FTYPE, build_dim, build_dim, observations[dd].nsubaps, observations[dd].nepochs, nλ)
+            observations[dd].model_images = zeros(FTYPE, observations[dd].dim, observations[dd].dim, observations[dd].nsubaps, observations[dd].nepochs)
+            observations[dd].w = findall((observations[dd].detector.filter.response .* observations[dd].detector.qe) .> 0)
+        end
+
+        if mfbd_verb_level == "full"
+            vm = true
+            vo = true
+        elseif mfbd_verb_level == "mfbd"
+            vm = true
+            vo = false
+        elseif mfbd_verb_level == "silent"
+            vm = false
+            vo = false
+        end
+        verb_levels = Dict("vm"=>vm, "vo"=>vo)
+
+        figs = ReconstructionFigures()
+        figs.object_fig, figs.object_ax, figs.object_obs = plot_object(object, show=false)
+        figs.opd_fig, figs.opd_ax, figs.opd_obs = plot_layers(atmosphere, show=false)
+        if plot == true
+            display(GLMakie.Screen(), figs.object_fig)
+            display(GLMakie.Screen(), figs.opd_fig)
+        end
+
+        if verb == true
+            println("")
+        end
+
+        return new{FTYPE}(λ, λtotal, nλ, nλint, nλtotal, Δλ, Δλtotal, ndatasets, build_dim, weight_function, gradient_object, gradient_opd, niter_mfbd, indx_boot, niter_boot, maxiter, ϵ, grtol, frtol, xrtol, maxeval, regularizers, smoothing, fwhm_schedule, helpers, patch_helpers, verb_levels, plot, figs)
     end
-
-    ## Reconstruct Phase
-    crit_opd = (x, g) -> fg_opd(x, g, observations, atmosphere, masks, patches, reconstruction, o_conv, o_corr, k_conv, k_corr)
-    vmlmb!(crit_opd, atmosphere.opd, verb=vo, mem=5, maxiter=reconstruction.maxiter, gtol=reconstruction.gtol, xtol=reconstruction.xtol, ftol=reconstruction.ftol, fmin=0)
-    GC.gc()
-
-    reconstruction.ϵ[1] = fg_object(object.object, similar(object.object), observations, reconstruction, patches)
 end
 
-function reconstruct_blind!(reconstruction, observations, atmosphere, object, masks, patches; verb="mfbd", plot=false)
+function gaussian_weighting(entropy, image, rn)
+    return 1 / (entropy * rn^2)
+end
+
+function mixed_weighting(entropy, image, rn)
+    return 1 ./ (entropy .* (image .+ rn^2))
+end
+
+
+@views function object_solve!(reconstruction, observations, object, patches)
     FTYPE = gettype(reconstruction)
-    if verb == "full"
-        vm = true
-        vo = true
-    elseif verb == "mfbd"
-        vm = true
-        vo = false
-    elseif verb == "silent"
-        vm = false
-        vo = false
-    end
+    reconstruction.ϵ = zero(FTYPE)  
+    crit_obj = (x, g) -> fg_object(x, g, observations, reconstruction, patches)
+    vmlmb!(crit_obj, object.object, lower=0, fmin=0, verb=reconstruction.verb_levels["vo"], maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["object"])
+end
 
-    if plot == true
-        ## Plots the object and both phase layers
-        fig = Figure(size=(600*atmosphere.nlayers, 600))
-        o_ax = Axis(fig[1, 1])
-        o_ax.title = "Object (mean)"
-        l_ax = [Axis(fig[1, 2*l+1]) for l=1:atmosphere.nlayers]
-        [l_ax[l].title = "Layer $(l) - OPD [nm]" for l=1:atmosphere.nlayers]
-        [hidedecorations!(ax) for ax in l_ax]
-        hidedecorations!(o_ax)
-        o_ax.aspect = DataAspect()
-        [ax.aspect = DataAspect() for ax in l_ax]
-        global o_obs = Observable(rotr90(dropdims(mean(object.object, dims=3), dims=3)))
-        global l_obs = [Observable(rotr90(atmosphere.opd[:, :, l].*atmosphere.masks[:, :, l, 1])) for l=1:atmosphere.nlayers]
-        o_plt = plot!(o_ax, o_obs, colormap=Reverse(:Greys))
-        l_plt = [plot!(l_ax[l], l_obs[l], colormap=Reverse(:Greys)) for l=1:atmosphere.nlayers]
-        Colorbar(fig[1, 2], o_plt, width=10, height=Relative(2/4))
-        [Colorbar(fig[1, 2*l+2], l_plt[l], width=10, height=Relative(2/4)) for l=1:atmosphere.nlayers]
-        trim!(fig.layout)
-        display(fig)
-    end
+@views function opd_solve!(reconstruction, observations, atmosphere, object, masks, patches)
+    FTYPE = gettype(reconstruction)
+    reconstruction.ϵ = zero(FTYPE)
+    helpers = reconstruction.helpers
+    fill_object_subplanes!(helpers.object_full, object.object, reconstruction.nλ, reconstruction.nλobject, reconstruction.Δλ, reconstruction.Δλobject, reconstruction.nsubλ)    
+    absolute_iter = (b-1)*reconstruction.niter_boot + current_iter
+    update_hyperparams(reconstruction, absolute_iter)
+    preconvolve_smoothing(reconstruction)
+    preconvolve_object(reconstruction, patches, object)
 
-    nthreads = Threads.nthreads()
-    k = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim)
-    k_conv = Vector{typeof(plan_conv_psf_buffer(k, k)[2])}(undef, nthreads)
-    k_corr = Vector{typeof(plan_ccorr_psf_buffer(k, k)[2])}(undef, nthreads)
-    o_conv = Array{typeof(plan_conv_psf_buffer(k, k)[2]), 3}(undef, reconstruction.nλ, patches.npatches, nthreads)
-    o_corr = Array{typeof(plan_ccorr_psf_buffer(k, k)[2]), 3}(undef, reconstruction.nλ, patches.npatches, nthreads)
-    patches.psfs = Vector{Array{FTYPE, 6}}(undef, reconstruction.ndatasets)
-    patches.ϕ_composite = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, patches.npatches, observations[1].nepochs, reconstruction.nλ)
-    patches.ϕ_slices = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, patches.npatches, observations[1].nepochs, atmosphere.nlayers, reconstruction.nλ)
-    for dd=1:reconstruction.ndatasets
-        patches.psfs[dd] = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs, reconstruction.nλ)
-        observations[dd].psfs = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, observations[dd].nsubaps, observations[dd].nepochs, reconstruction.nλ)
-        observations[dd].model_images = zeros(FTYPE, observations[dd].dim, observations[dd].dim, observations[dd].nsubaps, observations[dd].nepochs)
-    end
-    regularizers = reconstruction.regularizers
+    crit_opd = (x, g) -> fg_opd(x, g, observations, atmosphere, masks, patches, reconstruction)
+    vmlmb!(crit_opd, atmosphere.opd, verb=reconstruction.verb_levels["vo"], mem=5, fmin=0, maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["opd"])
+end
 
-    ## Perform MFBD iterations
+function reconstruct_blind!(reconstruction, observations, atmosphere, object, masks, patches; closeplots=true, write=false, folder="", id="")
+    FTYPE = gettype(reconstruction)
     for b=1:reconstruction.niter_boot
-        ndatasets_current = length(reconstruction.indx_boot[b])
         current_observations = observations[reconstruction.indx_boot[b]]
         current_masks = masks[reconstruction.indx_boot[b]]
-        
-        fill!(reconstruction.ϵ, zero(FTYPE))
+        reconstruction.ϵ = zero(FTYPE)
         for current_iter=1:reconstruction.niter_mfbd
-            if vm == true
+            if reconstruction.verb_levels["vm"] == true
                 print("Bootstrap Iter: $(b) MFBD Iter: $(current_iter) ")
             end
         
-            regularizers.βo *= regularizers.βo_schedule(current_iter)
-            regularizers.βϕ *= regularizers.βϕ_schedule(current_iter)
-            
-            fwhm = reconstruction.fwhm_schedule((b-1)*reconstruction.niter_boot + current_iter)
-            # fwhm = reconstruction.fwhm_schedule(current_iter)
-            k .= gaussian_kernel(reconstruction.build_dim, fwhm, FTYPE=FTYPE)
-            for tid=1:nthreads
-                k_conv[tid] = plan_conv_psf_buffer(k, k)[2]
-                k_corr[tid] = plan_ccorr_psf_buffer(k, k)[2]
-            end
-            
-            for w=1:reconstruction.nλ
-                for np=1:patches.npatches
-                    for tid=1:nthreads
-                        o_conv[w, np, tid] = plan_conv_psf_buffer(object.object[:, :, w], patches.w[:, :, np] .* object.object[:, :, w])[2]
-                        o_corr[w, np, tid] = plan_ccorr_psf_buffer(object.object[:, :, w], patches.w[:, :, np] .* object.object[:, :, w])[2]
-                    end
-                end
-            end
+            absolute_iter = (b-1)*reconstruction.niter_boot + current_iter
+            update_hyperparams(reconstruction, absolute_iter)
+            preconvolve_smoothing(reconstruction)
+            preconvolve_object(reconstruction, patches, object)
 
             ## Reconstruct complex pupil
-            if vm == true
+            if reconstruction.verb_levels["vm"] == true
                 print("--> Reconstructing complex pupil ")
             end
 
             ## Reconstruct Phase
-            crit_opd = (x, g) -> fg_opd(x, g, current_observations, atmosphere, current_masks, patches, reconstruction, o_conv, o_corr, k_conv, k_corr)
-            vmlmb!(crit_opd, atmosphere.opd, verb=vo, mem=5, maxiter=reconstruction.maxiter, gtol=reconstruction.gtol, xtol=reconstruction.xtol, ftol=reconstruction.ftol, fmin=0)
-            GC.gc()
-
-            if plot == true
-                for l=1:atmosphere.nlayers
-                    l_obs[l][] = rotr90(atmosphere.masks[:, :, l, 1] .* atmosphere.opd[:, :, l])
-                end
-            end
+            crit_opd = (x, g) -> fg_opd(x, g, current_observations, atmosphere, current_masks, patches, reconstruction)
+            vmlmb!(crit_opd, atmosphere.opd, verb=reconstruction.verb_levels["vo"], fmin=0, mem=5, maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["opd"])
+            update_layer_figure(atmosphere.opd, atmosphere, reconstruction)
 
             ## Reconstruct Object
-            if vm == true
+            if reconstruction.verb_levels["vm"] == true
                 print("--> object ")
             end
 
             crit_obj = (x, g) -> fg_object(x, g, current_observations, reconstruction, patches)
-            vmlmb!(crit_obj, object.object, lower=0, verb=vo, mem=5, maxiter=reconstruction.maxiter, gtol=reconstruction.gtol, xtol=reconstruction.xtol, ftol=reconstruction.ftol, fmin=0)
-            GC.gc()
-
-            if plot == true
-                o_obs[] = rotr90(dropdims(mean(object.object, dims=3), dims=3))
-            end
+            vmlmb!(crit_obj, object.object, lower=0, fmin=0, verb=reconstruction.verb_levels["vo"], maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["object"])
+            update_object_figure(dropdims(mean(object.object, dims=3), dims=3), reconstruction)
 
             ## Compute final criterion
-            reconstruction.ϵ[current_iter] = fg_object(object.object, similar(object.object), current_observations, reconstruction, patches)
-
-            if vm == true
-                print("--> ϵ:\t$(reconstruction.ϵ[current_iter])\n")
+            if reconstruction.verb_levels["vm"] == true
+                print("--> ϵ:\t$(reconstruction.ϵ)\n")
             end
+
+            if write == true
+                writefits(observations[1].model_images, "$(folder)/models_ISH1x1_recon$(id).fits")
+                writefits(observations[2].model_images, "$(folder)/models_ISH6x6_recon$(id).fits")
+                # writefits(patches.psfs[1], "$(folder)/psfs_ISH1x1_recon$(id).fits")
+                writefits(object.object, "$(folder)/object_recon$(id).fits")
+                writefits(atmosphere.opd, "$(folder)/opd_recon$(id).fits")
+                writefile([reconstruction.ϵ], "$(folder)/recon$(id).dat")
+            end
+            GC.gc()
         end
+        # reconstruction.smoothing = false
     end
+
+    if closeplots == true
+        GLMakie.closeall()
+    end
+
 end
 
 @views function height_solve!(observations, atmosphere, object, patches, masks, reconstruction; hmin=ones(atmosphere.nlayers-1), hmax=30.0.*ones(atmosphere.nlayers-1), hstep=ones(atmosphere.nlayers-1), niters=1, verb=true)
@@ -432,46 +415,75 @@ end
     order2fit = reverse(sortperm(atmosphere.wind[:, 1])[2:end])
     heights = zeros(FTYPE, atmosphere.nlayers)
     heights .= atmosphere.heights
-    ϵ = Vector{Vector{FTYPE}}(undef, nlayers2fit)
-    height_trials = reverse([collect(hmin[l]:hstep[l]:hmax[l]) for l=1:nlayers2fit])
+    height_trials = reverse([collect(FTYPE, hmin[l]:hstep[l]:hmax[l]) for l=1:nlayers2fit])
     # [heights[order2fit[l]] = height_trials[l][1] for l=1:nlayers2fit]
+    ϵ = [zeros(FTYPE, length(height_trials[l])) for l=1:nlayers2fit]
+    [fill!(ϵ[l], FTYPE(NaN)) for l=1:nlayers2fit]
     atmosphere_original = deepcopy(atmosphere)
     object_original = deepcopy(object)
 
-    patches.ϕ_slices = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, patches.npatches, observations[end].nepochs, atmosphere.nlayers, atmosphere.nλ)
-    patches.ϕ_composite = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, patches.npatches, observations[end].nepochs, atmosphere.nλ)
-    patches.psfs = Vector{Array{FTYPE, 6}}(undef, reconstruction.ndatasets)
-    for dd=1:reconstruction.ndatasets
-        patches.psfs[dd] = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs, reconstruction.nλ)
-        observations[dd].A = ones(FTYPE, reconstruction.build_dim, reconstruction.build_dim, observations[dd].nsubaps, patches.npatches, observations[dd].nepochs, atmosphere.nλ)
-        observations[dd].psfs = zeros(FTYPE, reconstruction.build_dim, reconstruction.build_dim, observations[dd].nsubaps, observations[dd].nepochs, reconstruction.nλ)
-        observations[dd].model_images = zeros(FTYPE, observations[dd].dim, observations[dd].dim, observations[dd].nsubaps, observations[dd].nepochs)
-    end
-    
+    heights_fig, heights_ax, heights_obs, ϵ_obs = plot_heights(atmosphere, heights=height_trials, ϵ=ϵ, show=true)
+    figs = reconstruction.figures
+    figs.heights_fig = heights_fig
+    figs.heights_ax = heights_ax
+    figs.heights_obs = heights_obs
+    figs.ϵ_obs = ϵ_obs
+
     for it=1:niters
         atmosphere = deepcopy(atmosphere_original)
+        [fill!(ϵ[l], FTYPE(NaN)) for l=1:nlayers2fit]
         for l=1:nlayers2fit
-            ϵ[l] = zeros(FTYPE, length(height_trials[l]))
             for h=1:length(height_trials[l])
                 heights[order2fit[l]] = height_trials[l][h]
                 print("\tHeight: $(heights)\t")
-                change_heights!(patches, atmosphere, object, observations, masks, heights, reconstruction=reconstruction)
-                opd_solve!(reconstruction, observations, atmosphere, object, masks, patches, verb="full", plot=false)
-                object_solve!(reconstruction, observations, object, patches; verb="full", plot=false)
+                change_heights!(patches, atmosphere, object, observations[end], masks[end], heights, reconstruction=reconstruction, verb=false)
+                reconstruct_blind!(reconstruction, observations, atmosphere, object, masks, patches, closeplots=false)
                 ϵ[l][h] = sum(reconstruction.ϵ[1])
                 println("ϵ: $(ϵ[l][h])")
                 atmosphere = deepcopy(atmosphere_original)
                 object = deepcopy(object_original)
+                update_heights_figure(height_trials, ϵ, atmosphere, reconstruction)
             end
             heights[order2fit[l]] = height_trials[l][argmin(ϵ[l])]
-            change_heights!(patches, atmosphere, object, observations, masks, heights, reconstruction=reconstruction)
+            change_heights!(patches, atmosphere, object, observations[end], masks[end], heights, reconstruction=reconstruction, verb=false)
         end
         println("Optimal Heights: $(heights)")
-        opd_solve!(reconstruction, observations, atmosphere, object, masks, patches, verb="full", plot=false)
-        object_solve!(reconstruction, observations, object, patches; verb="full", plot=false)
+        reconstruct_blind!(reconstruction, observations, atmosphere, object, masks, patches, closeplots=false)
         object_original = deepcopy(object)
         atmosphere_original = deepcopy(atmosphere)
+        update_heights_figure(height_trials, ϵ, atmosphere, reconstruction)
     end
+    GLMakie.closeall()
 
-    return ϵ, height_trials, atmosphere_original, object_original
+    return ϵ, height_trials, atmosphere, object
+end
+
+@views function preconvolve_object(reconstruction, patches, object)
+    helpers = reconstruction.helpers
+    for w=1:object.nλ
+        for np=1:patches.npatches
+            for tid=1:Threads.nthreads()
+                helpers.o_conv[w, np, tid] = plan_conv_psf_buffer(object.object[:, :, w], patches.w[:, :, np] .* object.object[:, :, w])[2]
+                helpers.o_corr[w, np, tid] = plan_ccorr_psf_buffer(object.object[:, :, w], patches.w[:, :, np] .* object.object[:, :, w])[2]
+            end
+        end
+    end
+end
+
+@views function preconvolve_smoothing(reconstruction)
+    helpers = reconstruction.helpers
+    for tid=1:Threads.nthreads()
+        helpers.k_conv[tid] = plan_conv_psf_buffer(helpers.smoothing_kernel, helpers.smoothing_kernel)[2]
+        helpers.k_corr[tid] = plan_ccorr_psf_buffer(helpers.smoothing_kernel, helpers.smoothing_kernel)[2]
+    end
+end
+
+function update_hyperparams(reconstruction, iter)
+    FTYPE = gettype(reconstruction)
+    regularizers = reconstruction.regularizers
+    helpers = reconstruction.helpers
+    regularizers.βo *= regularizers.βo_schedule(iter)
+    regularizers.βopd *= regularizers.βopd_schedule(iter)
+    fwhm = reconstruction.fwhm_schedule(iter)
+    helpers.smoothing_kernel .= gaussian_kernel(reconstruction.build_dim, fwhm, FTYPE=FTYPE)
 end

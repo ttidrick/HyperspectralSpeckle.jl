@@ -5,14 +5,17 @@ using Interpolations: interpolate, Gridded, Linear
 
 mutable struct Object{T<:AbstractFloat}
     λ::Vector{T}
+    nλ::Int64
     height::T
     fov::T
     sampling_arcsecperpix::T
     spectrum::Vector{T}
     flux::T
+    background_flux::T
     object::Array{T, 3}
     function Object(; 
             flux=Inf,
+            background_flux=0,
             λ=[Inf], 
             dim=0, 
             fov=0,
@@ -36,18 +39,23 @@ mutable struct Object{T<:AbstractFloat}
                 object[:, :, w] .*= spectrum[w] * qe[w]
             end
             object ./= sum(object)
+            # object .*= flux * (4445.01 / 1058.2726) / Δλ
             object .*= flux / Δλ
-            return new{FTYPE}(λ, height, fov, sampling_arcsecperpix, spectrum, flux, object)
+            return new{FTYPE}(λ, nλ, height, fov, sampling_arcsecperpix, spectrum, flux, background_flux, object)
         elseif (template == false) && (objectfile != "")
-            object = readfits(objectfile, FTYPE=FTYPE)
+            object = block_reduce(readfits(objectfile, FTYPE=FTYPE), dim)
+            if (length(size(object)) == 2) && (nλ == 1)
+                object = repeat(object, 1, 1, 1)
+            end
+
             for w=1:nλ
                 object[:, :, w] .*= spectrum[w] * qe[w]
             end
             object ./= sum(object)
             object .*= flux / Δλ
-            return new{FTYPE}(λ, height, fov, sampling_arcsecperpix, spectrum, flux, object)
+            return new{FTYPE}(λ, nλ, height, fov, sampling_arcsecperpix, spectrum, flux, background_flux, object)
         else
-            return new{FTYPE}(λ, height, fov, sampling_arcsecperpix, spectrum)
+            return new{FTYPE}(λ, nλ, height, fov, sampling_arcsecperpix, spectrum)
         end
     end
 end

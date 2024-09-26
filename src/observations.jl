@@ -1,3 +1,6 @@
+import Interpolations: LinearInterpolation, Line
+
+
 const FILTER_FILENAMES = Dict(
     "Bessell:U"=>"data/filters/Generic_Bessell.U.dat",
     "Bessell:B"=>"data/filters/Generic_Bessell.B.dat",
@@ -10,11 +13,23 @@ const FILTER_FILENAMES = Dict(
 struct Filter{T<:AbstractFloat}
     λ::Vector{T}
     response::Vector{T}
-    function Filter(
-            filtername; 
+    function Filter(;
+            filtername="", 
+            λ=[],
+            response=[],
             FTYPE=Float64
         )
-        λfilter, response = readfile(FILTER_FILENAMES["$filtername"])
+        if filtername != ""
+            λfilter, response = readfile(FILTER_FILENAMES["$filtername"])
+            if λ != []
+                itp = LinearInterpolation(λfilter, response, extrapolation_bc=Line())
+                response = itp(λ)
+                λfilter = λ
+            end
+        else
+            λfilter = λ
+        end
+
         return new{FTYPE}(λfilter, response)
     end
 end
@@ -26,24 +41,23 @@ struct Detector{T<:AbstractFloat, S<:Integer}
     rn::T
     gain::T
     saturation::T
-    pixscale::Vector{T}
+    pixscale::T
     exptime::T
     filter::Filter{T}
     function Detector(;
-            λ=[400.0],
+            λ=[],
             λ_nyquist=400.0,
-            pixscale=[0.0],
-            qe=[0.8],
-            rn=2.0,
+            pixscale=0.0,
+            qe=[1.0],
+            rn=0.0,
             gain=1.0,
             saturation=1e99,
             exptime=5e-3,
-            filtername="broadband",
+            filter=Filter(λ=λ, response=ones(FTYPE, length(λ)), FTYPE=Float64),
             FTYPE=Float64,
-            ITYPE=Int64
+            DTYPE=UInt16
         )
-        filter = Filter(filtername, FTYPE=FTYPE)
-        return new{FTYPE, ITYPE}(λ, λ_nyquist, qe, rn, gain, saturation, pixscale, exptime, filter)
+        return new{FTYPE, DTYPE}(λ, λ_nyquist, qe, rn, gain, saturation, pixscale, exptime, filter)
     end
 end
 
@@ -60,15 +74,15 @@ mutable struct Observations{T<:AbstractFloat}
     model_images::Array{T, 4}
     psfs::Array{T, 5}
     monochromatic_images::Array{T, 5}
-    A::Array{T, 6}
+    w::Vector{Int64}
     function Observations(
             detector;
-            ζ=Inf,
-            D=Inf,
-            nepochs=0,
-            nsubaps=0,
-            α=Inf,
-            dim=0,
+            ζ=0.0,
+            D=1.0,
+            nepochs=1,
+            nsubaps=1,
+            α=1.0,
+            dim=256,
             datafile::String = "",
             FTYPE=Float64
         )
@@ -76,6 +90,7 @@ mutable struct Observations{T<:AbstractFloat}
             images, nsubaps, nepochs, dim = readimages(datafile, FTYPE=FTYPE)
             entropy = [calculate_entropy(images[:, :, n, t]) for n=1:nsubaps, t=1:nepochs]
             println("Loading $(nepochs) frames of size $(dim)x$(dim) pixels for $(nsubaps) subapertures")
+            print(" |-> "); printstyled("$(datafile)\n", color=:red)
             return new{FTYPE}(detector, ζ, D, nepochs, nsubaps, α, dim, images, entropy)
         else
             return new{FTYPE}(detector, ζ, D, nepochs, nsubaps, α, dim)

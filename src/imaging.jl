@@ -1,3 +1,4 @@
+using Distributions
 using TwoDimensional
 using LinearInterpolators
 
@@ -37,10 +38,21 @@ function create_refraction_operator(λ, λ_ref, ζ, pixscale, build_dim; FTYPE=F
     kernel = LinearSpline(FTYPE)
     transform = AffineTransform2D{FTYPE}()
     θref = get_refraction(λ_ref, ζ)
-    build_size = (Int64(build_dim), Int64(build_dim))
     θλ = get_refraction(λ, ζ)
-    Δpix = FTYPE(206265*(θλ-θref) / (pixscale * FTYPE(build_dim)))
+    build_size = (Int64(build_dim), Int64(build_dim))
+    Δpix = FTYPE((θλ-θref)*206265 / pixscale)
     refraction = TwoDimensionalTransformInterpolator(build_size, build_size, kernel, transform - (Δpix, 0))
+    return refraction
+end
+
+function create_refraction_adjoint(λ, λ_ref, ζ, pixscale, build_dim; FTYPE=Float64)
+    kernel = LinearSpline(FTYPE)
+    transform = AffineTransform2D{FTYPE}()
+    θref = get_refraction(λ_ref, ζ)
+    θλ = get_refraction(λ, ζ)
+    build_size = (Int64(build_dim), Int64(build_dim))
+    Δpix = FTYPE((θλ-θref)*206265 / pixscale)
+    refraction = TwoDimensionalTransformInterpolator(build_size, build_size, kernel, transform + (Δpix, 0))
     return refraction
 end
 
@@ -68,6 +80,30 @@ function pupil2psf!(psf, psf_temp, mask, P, p, A, ϕ, α, scale_psf, ifft_preall
     mul!(psf, refraction, psf_temp)
 end
 
+@views function poly2broadbandpsfs(patches, observations, Δλ, nλ)
+    FTYPE = gettype(observations[1])
+    ndatasets = length(observations)
+    patches.broadband_psfs = Vector{Array{FTYPE, 5}}(undef, ndatasets)
+    for dd=1:ndatasets
+        observation = observations[dd]
+        psfs = patches.psfs[dd]
+        patches.broadband_psfs[dd] = zeros(FTYPE, observation.dim, observation.dim, patches.npatches, observation.nsubaps, observation.nepochs)
+        poly2broadbandpsfs!(patches.broadband_psfs[dd], psfs, patches, observation, Δλ, nλ)
+    end
+end
+
+@views function poly2broadbandpsfs!(broadband_psfs, psfs, patches, observations, Δλ, nλ)
+    Threads.@threads for t=1:observations.nepochs
+        for n=1:observations.nsubaps
+            for np=1:patches.npatches
+                for w=1:nλ
+                    broadband_psfs[:, :, np, n, t] .+= psfs[:, :, np, n, t, w] ./ nλ
+                end
+            end
+        end
+    end
+end
+
 function create_monochromatic_image(object, psf, dim)
     image_big = conv_psf(object, psf)
     image_small = block_reduce(image_big, dim)
@@ -76,6 +112,11 @@ end
 
 function create_monochromatic_image!(image_small, image_big, object::AbstractMatrix{<:AbstractFloat}, psf)
     image_big .= conv_psf(object, psf)
+    block_reduce!(image_small, image_big)
+end
+
+function create_monochromatic_image!(image_small, image_big, object::AbstractMatrix{<:AbstractFloat}, psf, conv_prealloc)
+    image_big .= conv_prealloc(object, psf)
     block_reduce!(image_small, image_big)
 end
 
@@ -97,6 +138,15 @@ end
     nλ = length(λ)
     for w=1:nλ
         create_monochromatic_image!(image_small, image_big, object[:, :, w], psfs[:, :, w])
+        image .+= image_small
+    end
+    image .*= Δλ
+end
+
+@views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 2}, image_big, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ, conv_prealloc)
+    nλ = length(λ)
+    for w=1:nλ
+        create_monochromatic_image!(image_small, image_big, object[:, :, w], psfs[:, :, w], conv_prealloc)
         image .+= image_small
     end
     image .*= Δλ
@@ -130,12 +180,52 @@ end
     image .*= Δλ
 end
 
+@views function create_polychromatic_image!(image, image_small::AbstractMatrix{<:AbstractFloat}, image_big, ω, object_patch, object::AbstractMatrix{<:AbstractFloat}, psfs, λ, Δλ)
+    nλ = length(λ)
+    for w=1:nλ
+        object_patch .= ω .* object
+        create_monochromatic_image!(image_small, image_big, object_patch, psfs[:, :, w])
+        image .+= image_small
+    end
+    image .*= Δλ
+end
+
 @views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 3}, image_big, ω, object_patch, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ)
     nλ = length(λ)
     for w=1:nλ
         object_patch .= ω .* object[:, :, w]
         create_monochromatic_image!(image_small[:, :, w], image_big, object_patch, psfs[:, :, w])
+        image .+= image_small[:, :, w]
+    end
+    image .*= Δλ
+end
+
+@views function create_polychromatic_image!(image, image_small::AbstractMatrix{<:AbstractFloat}, image_big, ω, object_patch, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ, conv_prealloc)
+    nλ = length(λ)
+    for w=1:nλ
+        object_patch .= ω .* object[:, :, w]
+        create_monochromatic_image!(image_small, image_big, object_patch, psfs[:, :, w], conv_prealloc)
         image .+= image_small
+    end
+    image .*= Δλ
+end
+
+@views function create_polychromatic_image!(image, image_small::AbstractMatrix{<:AbstractFloat}, image_big, ω, object_patch, object::AbstractMatrix{<:AbstractFloat}, psfs, λ, Δλ, conv_prealloc)
+    nλ = length(λ)
+    for w=1:nλ
+        object_patch .= ω .* object
+        create_monochromatic_image!(image_small, image_big, object_patch, psfs[:, :, w], conv_prealloc)
+        image .+= image_small
+    end
+    image .*= Δλ
+end
+
+@views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 3}, image_big, ω, object_patch, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ, conv_prealloc)
+    nλ = length(λ)
+    for w=1:nλ
+        object_patch .= ω .* object[:, :, w]
+        create_monochromatic_image!(image_small[:, :, w], image_big, object_patch, psfs[:, :, w], conv_prealloc)
+        image .+= image_small[:, :, w]
     end
     image .*= Δλ
 end
@@ -147,4 +237,9 @@ function add_noise!(image, rn, poisson::Bool; FTYPE=Float64)
     ## Read noise has a non-zero mean and sigma!
     image .+= rn .* randn(FTYPE, size(image))
     image .= max.(image, Ref(zero(FTYPE)))
+end
+
+function add_background!(image, background_flux; FTYPE=Float64)
+    dim = size(image, 1)
+    image .+= background_flux / dim^2
 end
