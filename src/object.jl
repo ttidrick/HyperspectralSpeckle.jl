@@ -22,7 +22,7 @@ mutable struct Object{T<:AbstractFloat}
             height=0,
             spectrum=[0],
             qe=[0],
-            objectfile="", 
+            objectfile="",
             template=false, 
             FTYPE=Float64,
             verb=true

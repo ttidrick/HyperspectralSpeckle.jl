@@ -67,6 +67,7 @@ mutable struct Observations{T<:AbstractFloat}
     D::T
     nepochs::Int64
     nsubaps::Int64
+    nsubaps_side::Int64
     α::T
     dim::Int64
     images::Array{T, 4}
@@ -81,6 +82,7 @@ mutable struct Observations{T<:AbstractFloat}
             D=1.0,
             nepochs=1,
             nsubaps=1,
+            nsubaps_side=1,
             α=1.0,
             dim=256,
             datafile::String = "",
@@ -91,9 +93,25 @@ mutable struct Observations{T<:AbstractFloat}
             entropy = [calculate_entropy(images[:, :, n, t]) for n=1:nsubaps, t=1:nepochs]
             println("Loading $(nepochs) frames of size $(dim)x$(dim) pixels for $(nsubaps) subapertures")
             print(" |-> "); printstyled("$(datafile)\n", color=:red)
-            return new{FTYPE}(detector, ζ, D, nepochs, nsubaps, α, dim, images, entropy)
+            return new{FTYPE}(detector, ζ, D, nepochs, nsubaps, nsubaps_side, α, dim, images, entropy)
         else
-            return new{FTYPE}(detector, ζ, D, nepochs, nsubaps, α, dim)
+            return new{FTYPE}(detector, ζ, D, nepochs, nsubaps, nsubaps_side, α, dim)
         end
     end
+end
+
+@views function calculate_wfs_slopes(observations_wfs)
+    FTYPE = gettype(observations_wfs)
+    ~, ~, nsubaps, nepochs = size(observations_wfs.images)
+    ∇ϕx = zeros(FTYPE, nsubaps, nepochs)
+    ∇ϕy = zeros(FTYPE, nsubaps, nepochs)
+    composite_image = dropdims(sum(observations_wfs.images, dims=(3, 4)), dims=(3, 4))
+    for n=1:nsubaps
+        for t=1:nepochs
+            Δy, Δx = Tuple(argmax(ccorr_psf(composite_image, observations_wfs.images[:, :, n, t])))
+            ∇ϕx[n, t] = Δx * observations_wfs.D / observations_wfs.nsubaps_side
+            ∇ϕy[n, t] = Δy * observations_wfs.D / observations_wfs.nsubaps_side
+        end
+    end
+    return ∇ϕx, ∇ϕy
 end

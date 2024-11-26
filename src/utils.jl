@@ -228,11 +228,16 @@ end
 function smooth_to_rmse!(ϕ_smooth, ϕ, rms_target, mask, dim; FTYPE=Float64)
     rms = Inf
     fwhm = dim/10
-    while (rms-rms_target > 1e-3)
+    while (abs(rms-rms_target) > 1e-3)
         k = gaussian_kernel(dim, fwhm, FTYPE=FTYPE)
         ϕ_smooth .= conv_psf(ϕ, k)
         rms = sqrt(mean((ϕ_smooth[mask .> 0] .- ϕ[mask .> 0]).^2))
-        fwhm -= fwhm*0.01
+        # println(fwhm, " ", rms)
+        if sign(rms - rms_target) == 1 
+            fwhm -= fwhm*0.005
+        elseif sign(rms - rms_target) == -1
+            fwhm += fwhm*0.005
+        end
     end
 end
 
@@ -412,4 +417,44 @@ function calculate_ssim(x, y)
     s = (σxy + k2^2/4) / (σx*σy + k2^2/4)
     ssim = l * c * s
     return ssim
+end
+
+@views function stack2mosaic(stack::AbstractVector{<:AbstractFloat}, nside, ix)
+    ## 1d vec of numbers to 2d image
+    FTYPE = eltype(stack)
+    mosaic = zeros(FTYPE, nside, nside)
+    n1 = n2 = 1
+    for y=1:nside
+        for x=1:nside
+            if (n1 in ix) == true
+                mosaic[y, x] = stack[n2]
+                n2 += 1
+            end
+            n1 += 1     
+        end
+    end
+ 
+    return mosaic
+end
+
+function stack2mosaic(stack::AbstractArray{<:AbstractFloat, 3}, nside, ix)
+    ## 3d stack of images to 2d mosaic image
+    FTYPE = eltype(stack)
+    dim = size(stack, 1)
+    mosaic = zeros(FTYPE, dim*nside, dim*nside)
+    n1 = 1
+    n2 = 1
+    for y=1:nside
+        ixy = (y-1)*dim+1:y*dim
+        for x=1:nside
+            ixx = (x-1)*dim+1:x*dim
+            if (n1 in ix) == true
+                mosaic[ixy, ixx] .= stack[:, :, n2]
+                n2 += 1
+            end
+            n1 += 1     
+        end
+    end
+
+    return mosaic
 end

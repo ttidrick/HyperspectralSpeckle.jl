@@ -9,7 +9,9 @@ mutable struct Masks{T<:AbstractFloat}
     nλ::Int64
     Δλ::T
     nsubaps::Int64
+    nsubaps_side::Int64
     scale_psfs::Vector{T}
+    ix::Vector{Int64}
     function Masks(;
             maskfile="",
             dim=256,
@@ -22,15 +24,16 @@ mutable struct Masks{T<:AbstractFloat}
             masks, λ = readmasks(maskfile, FTYPE=FTYPE)
             dim = size(masks, 1)
         else
-            masks = make_ish_masks(dim, nsubaps_side, λ, λ_nyquist=λ_nyquist, FTYPE=FTYPE)
+            masks, ix = make_ish_masks(dim, nsubaps_side, λ, λ_nyquist=λ_nyquist, FTYPE=FTYPE)
         end
 
         nλ = length(λ)
         Δλ = (nλ == 1) ? 1.0 : (maximum(λ) - minimum(λ)) / (nλ - 1)
 
         nsubaps = size(masks, 3)
+        # nsubaps_side = round(Int, sqrt(nsubaps))
         scale_psfs = [FTYPE(1 / norm(masks[:, :, 1, w], 2)) for w=1:nλ]
-        new{FTYPE}(masks, dim, λ, λ_nyquist, nλ, Δλ, nsubaps, scale_psfs)
+        new{FTYPE}(masks, dim, λ, λ_nyquist, nλ, Δλ, nsubaps, nsubaps_side, scale_psfs, ix)
     end
 end
 
@@ -102,7 +105,8 @@ end
         end
     end
 
-    return subaperture_masks[:, :, keepix, :]
+    ix = findall(keepix .== 1)
+    return subaperture_masks[:, :, keepix, :], ix
 end
 
 @views function readmasks(files; FTYPE=Float64)

@@ -4,17 +4,17 @@ using Main.MFBD
 using Statistics
 ############# Data Parameters #############
 FTYPE = Float32;
-folder = "data/test"
+folder = "data"
 id = ""
 verb = true
 ###########################################
 
 ##### Size, Timestep, and Wavelengths #####
 image_dim = 256
-wfs_dim = 32
+wfs_dim = 64
 
-nsubaps_side = 12
-nepochs = 100
+nsubaps_side = 6
+nepochs = 33
 nλ = 1
 λ_nyquist = 500.0
 λ_ref = 500.0
@@ -37,7 +37,7 @@ masks_full = Masks(
     FTYPE=FTYPE
 )
 maskfile = "$(folder)/ish_subaps_1x1$(id).fits"
-writefits(masks_full.masks, maskfile, header=header)
+# writefits(masks_full.masks, maskfile, header=header)
 masks_wfs = Masks(
     dim=image_dim,
     nsubaps_side=nsubaps_side, 
@@ -48,16 +48,14 @@ masks_wfs = Masks(
 nsubaps = masks_wfs.nsubaps
 masks_wfs.scale_psfs = masks_full.scale_psfs
 maskfile = "$(folder)/ish_subaps_$(nsubaps_side)x$(nsubaps_side)$(id).fits"
-writefits(masks_wfs.masks, maskfile, header=header)
+# writefits(masks_wfs.masks, maskfile, header=header)
 masks = [masks_full, masks_wfs]
-# masks = [masks_full]
-#########################################
+###########################################
 
 ### Detector & Observations Parameters ####
 D = 3.6  # m
-# fov = 20 * 256 / (132 * (256 / 512))
-fov = 20.0
-# fov = 100.0
+fov = 20 * 256 / (132 * (256 / 512))
+# fov = 10.0
 pixscale_full = fov / image_dim
 pixscale_wfs = pixscale_full * nsubaps_side
 qefile = "data/qe/prime-95b_qe.dat"
@@ -65,7 +63,7 @@ qefile = "data/qe/prime-95b_qe.dat"
 # qe = ones(FTYPE, nλ)
 rn = 2.0
 exptime = 5e-3
-noise = false
+noise = true
 ζ = 0.0
 ######### Create Full-Ap Detector #########
 filter = Filter(filtername="Bessell:V", FTYPE=FTYPE)
@@ -111,20 +109,18 @@ observations_wfs = Observations(
     FTYPE=FTYPE
 )
 observations = [observations_full, observations_wfs]
-# observations = [observations_full]
 ###########################################
 
 ############ Object Parameters ############
-objectfile = "data/star.fits"
+objectfile = "data/saturn512.fits"
 ~, spectrum = solar_spectrum(λ=λ)
 # spectrum = ones(FTYPE, nλ)
 template = false
-mag = 4
-background_mag = Inf ## mag / arcsec^2
+mag = 1.17
+background_mag = FTYPE(Inf)
 flux = mag2flux(λ, spectrum, mag, observations_full.detector, D=D, ζ=ζ, exptime=exptime)
 background_flux = mag2flux(λ, ones(nλ), background_mag, observations_full.detector, D=D, ζ=ζ, exptime=exptime)
-background_flux *= fov^2
-object_height = Inf# 1.434e6  # km
+object_height = 1.434e6  # km
 ############## Create object ##############
 object = Object(
     flux=flux,
@@ -139,11 +135,11 @@ object = Object(
     template=template,
     FTYPE=FTYPE
 )
-writefits(object.object, "$(folder)/object_truth$(id).fits", header=header)
+writefits(object.object, "$(folder)/object_truth.fits", header=header)
 ###########################################
 
 ########## Anisopatch Parameters ##########
-isoplanatic = true
+isoplanatic = false
 patch_overlap = 0.5
 patch_dim = 64
 ###### Create Anisoplanatic Patches #######
@@ -156,14 +152,14 @@ L0 = 100.0  # m
 Dr0_vertical = 20.0
 Dr0_composite = Dr0_vertical * sec(ζ*pi/180)
 r0_composite = D / Dr0_composite
-heights = [12.5] # [0.0, 7.0, 12.5]
+heights = [0.0, 7.0, 12.5]
 wind_speed = wind_profile_roberts2011(heights, ζ)
-wind_direction = [45.0]# [45.0, 125.0, 135.0]
+wind_direction = [45.0, 125.0, 135.0]
 wind = [wind_speed wind_direction]
 nlayers = length(heights)
 propagate = false
 r0 = (r0_composite / nlayers^(-3/5)) .* ones(nlayers)  # m
-seeds = [713]# [713, 1212, 525118]
+seeds = rand(1:10000, 3)#[713, 1212, 525118]
 sampling_nyquist_mperpix = layer_nyquist_sampling_mperpix(D, image_dim, nlayers)
 sampling_nyquist_arcsecperpix = layer_nyquist_sampling_arcsecperpix(D, fov, heights, image_dim)
 ############ Create Atmosphere ############
@@ -186,21 +182,18 @@ calculate_screen_size!(atmosphere, observations_full, object, patches, verb=verb
 calculate_pupil_positions!(atmosphere, observations_full, verb=verb)
 calculate_layer_masks_eff!(patches, atmosphere, observations_full, object, masks_full, verb=verb)
 create_phase_screens!(atmosphere, observations_full)
-# opd_smooth = calculate_smoothed_opd(atmosphere, observations_full, 0.1)
-atmosphere.opd .*= atmosphere.masks
-# opd_smooth .*= atmosphere.masks
+atmosphere.opd .*= atmosphere.masks[:, :, :, 1]
 
 # opd_smooth = calculate_smoothed_opd(atmosphere, observations_full)
 calculate_composite_pupil_eff(patches, atmosphere, observations, object, masks, build_dim=image_dim, propagate=propagate)
-# writefits(atmosphere.masks, "$(folder)/layer_masks$(id).fits", header=header)
+writefits(atmosphere.masks, "$(folder)/layer_masks$(id).fits", header=header)
 # writefits(observations_full.A, "$(folder)/Dr0_$(Dr0_composite)_ISH1x1_amplitude$(id).fits")
 # writefits(observations_wfs.A, "$(folder)/Dr0_$(Dr0_composite)_ISH$(nsubaps_side)x$(nsubaps_side)_amplitude$(id).fits")
 # writefits(atmosphere.ϕ, "$(folder)/Dr0_$(Dr0_composite)_phase_full$(id).fits", header=header)
 # writefits(patches.ϕ_slices, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_phase_slices$(id).fits", header=header)
 # writefits(patches.ϕ_composite, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_phase_composite$(id).fits", header=header)
-# writefits(atmosphere.opd, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full$(id).fits")
+writefits(atmosphere.opd, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full$(id).fits")
 # writefits(opd_smooth, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full_smooth$(id).fits")
-# exit()
 ###########################################
 
 ########## Create Full-Ap images ##########

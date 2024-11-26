@@ -5,23 +5,25 @@ using LinearAlgebra
 using OptimPackNextGen
 
 
-if Threads.nthreads() == 1
-    FFTW.set_num_threads(4)
-else
-    FFTW.set_num_threads(1)
-end
-
-function ConstantSchedule()
+function ConstantSchedule(fwhm)
     function constant(x)
-        return x
+        return fwhm
     end
 
     return constant
 end
 
-function ReciprocalDecaySchedule(maxval, niters, minval)
-    function reciprocal(x)
+function LinearSchedule(maxval, niters, minval)
+    function linear(x)
         return max(maxval * (1 - (x-1)/niters), minval)
+    end
+
+    return linear
+end
+
+function ReciprocalSchedule(maxval, minval)
+    function reciprocal(x)
+        return max(maxval * (1 / x), minval)
     end
 
     return reciprocal
@@ -223,9 +225,9 @@ mutable struct Reconstruction{T<:AbstractFloat}
             frtol=1e-9,
             xrtol=1e-9,
             smoothing=false,
-            maxFWHM=10.0,
-            minFWHM=0.1,
-            fwhm_schedule=ReciprocalDecaySchedule(maxFWHM, niter_mfbd, minFWHM),
+            maxFWHM=50.0,
+            minFWHM=0.5,
+            fwhm_schedule=ReciprocalSchedule(maxFWHM, minFWHM),
             regularizers=[],
             helpers=[],
             patch_helpers=[],
@@ -353,14 +355,17 @@ function reconstruct_blind!(reconstruction, observations, atmosphere, object, ma
         current_masks = masks[reconstruction.indx_boot[b]]
         reconstruction.ϵ = zero(FTYPE)
         for current_iter=1:reconstruction.niter_mfbd
-            if reconstruction.verb_levels["vm"] == true
-                print("Bootstrap Iter: $(b) MFBD Iter: $(current_iter) ")
-            end
-        
-            absolute_iter = (b-1)*reconstruction.niter_boot + current_iter
+            absolute_iter = (b-1)*reconstruction.niter_mfbd + current_iter
             update_hyperparams(reconstruction, absolute_iter)
             preconvolve_smoothing(reconstruction)
             preconvolve_object(reconstruction, patches, object)
+
+            if reconstruction.verb_levels["vm"] == true
+                print("Bootstrap Iter: $(b) MFBD Iter: $(current_iter) ")
+                if reconstruction.smoothing == true
+                    print("FWHM: $(reconstruction.fwhm_schedule(absolute_iter)) ")
+                end
+            end
 
             ## Reconstruct complex pupil
             if reconstruction.verb_levels["vm"] == true
@@ -381,22 +386,24 @@ function reconstruct_blind!(reconstruction, observations, atmosphere, object, ma
             vmlmb!(crit_obj, object.object, lower=0, fmin=0, verb=reconstruction.verb_levels["vo"], maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["object"])
             update_object_figure(dropdims(mean(object.object, dims=3), dims=3), reconstruction)
 
+            # for l=1:atmosphere.nlayers
+            #     atmosphere.opd[:, :, l] .-= fit_plane(atmosphere.opd[:, :, l], atmosphere.masks[:, :, l]) .* atmosphere.masks[:, :, l]
+            # end
+            # atmosphere.opd .*= atmosphere.masks
+
             ## Compute final criterion
             if reconstruction.verb_levels["vm"] == true
                 print("--> ϵ:\t$(reconstruction.ϵ)\n")
             end
 
             if write == true
-                writefits(observations[1].model_images, "$(folder)/models_ISH1x1_recon$(id).fits")
-                writefits(observations[2].model_images, "$(folder)/models_ISH6x6_recon$(id).fits")
-                # writefits(patches.psfs[1], "$(folder)/psfs_ISH1x1_recon$(id).fits")
+                [writefits(observations[dd].model_images, "$(folder)/models_ISH$(observations[dd].nsubaps_side)x$(observations[dd].nsubaps_side)_recon$(id).fits") for dd=1:reconstruction.ndatasets]
                 writefits(object.object, "$(folder)/object_recon$(id).fits")
                 writefits(atmosphere.opd, "$(folder)/opd_recon$(id).fits")
                 writefile([reconstruction.ϵ], "$(folder)/recon$(id).dat")
             end
             GC.gc()
         end
-        # reconstruction.smoothing = false
     end
 
     if closeplots == true

@@ -15,9 +15,9 @@ mutable struct Regularizers{T<:AbstractFloat}
             βo=0.0,
             βopd=0.0,
             βλ=0.0,
-            βo_schedule=ConstantSchedule(),
-            βopd_schedule=ConstantSchedule(),
-            βλ_schedule=ConstantSchedule(),
+            βo_schedule=ConstantSchedule(βo),
+            βopd_schedule=ConstantSchedule(βopd),
+            βλ_schedule=ConstantSchedule(βλ),
             verb=true,
             FTYPE=Float64
         )

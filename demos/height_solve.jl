@@ -6,7 +6,7 @@ show_the_sausage()
 
 ############# Data Parameters #############
 FTYPE = Float32;
-folder = "/home/dan/Desktop/ApJL_2024/separations/recon/Delta_mag5";
+folder = "/home/dan/Desktop/dissertation";
 verb = true
 plot = false
 ###########################################
@@ -26,7 +26,7 @@ nλint = 1
 λ₀ = (nλ₀ == 1) ? [mean([λmax, λmin])] : collect(range(λmin, stop=λmax, length=nλ₀))
 Δλ = (nλ == 1) ? 1.0 : (λmax - λmin) / (nλ - 1)
 ###########################################
-id = "_aniso_2arcsec_height_solve_2"
+id = "_height_solve"
 
 ########## Anisopatch Parameters ##########
 ## Unused but sets the size of the layer ##
@@ -39,9 +39,8 @@ patches = AnisoplanaticPatches(patch_dim, image_dim, patch_overlap, isoplanatic=
 
 ### Detector & Observations Parameters ####
 D = 3.6  # m
-# fov = 10.0
-fov =  256 / 78.5 * 2.0  
 # fov = 20 * 256 / (132 * (256 / 512))
+fov = 30.0
 pixscale_full = fov / image_dim  # 0.25 .* ((λ .* 1e-9) .* 1e6) ./ D
 pixscale_wfs = pixscale_full * nsubaps_side
 qefile = "data/qe/prime-95b_qe.dat"
@@ -63,7 +62,7 @@ detector_full = Detector(
     FTYPE=FTYPE
 )
 ### Create Full-Ap Observations object ####
-datafile = "$(folder)/Dr0_20_ISH1x1_images_2arcsec.fits"
+datafile = "$(folder)/Dr0_20_ISH1x1_images.fits"
 observations_full = Observations(
     detector_full,
     ζ=ζ,
@@ -83,7 +82,7 @@ detector_wfs = Detector(
     filter=filter,
     FTYPE=FTYPE
 )
-datafile = "$(folder)/Dr0_20_ISH6x6_images_2arcsec.fits"
+datafile = "$(folder)/Dr0_20_ISH6x6_images.fits"
 observations_wfs = Observations(
     detector_wfs,
     ζ=ζ,
@@ -114,11 +113,10 @@ masks_wfs = Masks(
 nsubaps = masks_wfs.nsubaps
 masks_wfs.scale_psfs = masks_full.scale_psfs
 masks = [masks_full]
-# masks = [masks_full]
 ###########################################
 
 ############ Object Parameters ############
-object_height = 1.434e6  # km
+object_height = 550.0# 1.434e6  # km
 ############## Create object ##############
 object = Object(
     λ=λ,
@@ -128,17 +126,13 @@ object = Object(
     FTYPE=FTYPE
 )
 
-# all_subap_images = 1 / (observations_full.nepochs*observations_full.nsubaps) .* dropdims(sum(observations_full.images, dims=(3, 4)), dims=(3, 4))
-# object.object = repeat(all_subap_images, 1, 1, nλ)
-# object.object ./= sum(object.object)
-# object.object .*= mean(sum(observations_full.images, dims=(1, 2)), dims=(3, 4))
-object.object = readfits("$(folder)/object_recon_aniso_2arcsec_restart.fits")
+object.object = readfits("$(folder)/object_recon_iso.fits")
 ###########################################
 
 ########## Atmosphere Parameters ##########
 heights = [0.0, 7.0, 12.5]
 wind_speed = wind_profile_roberts2011(heights, ζ)
-heights = [0.0, 5.0, 10.0]
+heights .*= 0.0
 wind_direction = [45.0, 125.0, 135.0]
 wind = [wind_speed wind_direction]
 nlayers = length(heights)
@@ -161,8 +155,7 @@ atmosphere = Atmosphere(
 calculate_screen_size!(atmosphere, observations_full, object, patches)
 calculate_pupil_positions!(atmosphere, observations_full)
 calculate_layer_masks_eff!(patches, atmosphere, observations_full, object, masks_full)
-atmosphere.opd = readfits("$(folder)/opd_recon_aniso_2arcsec_restart.fits")
-# atmosphere.opd = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers)
+atmosphere.opd = readfits("$(folder)/opd_recon_iso.fits")
 ###########################################
 
 ######### Reconstruction Object ###########

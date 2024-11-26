@@ -150,10 +150,8 @@ end
 
     # Apply regularization
     for l=1:atmosphere.nlayers
-        # reconstruction.figures.opd_obs[l][] = rotr90(g[:, :, l])
         ϵ += regularizers.opd_reg(x[:, :, l], g[:, :, l], regularizers.βopd)
     end
-    # readline()
 
     reconstruction.ϵ = ϵ
     return ϵ

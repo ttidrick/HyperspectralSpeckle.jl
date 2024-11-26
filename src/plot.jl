@@ -3,7 +3,7 @@ using PerceptualColourMaps
 GLMakie.activate!()
 
 const PLOT_OPTIONS = (
-    CMAP_OBJECT = :lajolla,
+    CMAP_OBJECT = cmap("L01"),
     CMAP_WAVEFRONT = cmap("L20")#:haline
 )
 
@@ -52,7 +52,7 @@ function plot_layers(atmosphere; show=false, write=false, filename="", label="OP
     [l_ax[l].title = "Layer $(l) - $(label)" for l=1:atmosphere.nlayers]
     [hidedecorations!(ax) for ax in l_ax]
     [ax.aspect = DataAspect() for ax in l_ax]
-    l_obs = [Observable(rotr90(atmosphere.opd[:, :, l].*atmosphere.masks[:, :, l, 1])) for l=1:atmosphere.nlayers]
+    l_obs = [Observable(rotr90(atmosphere.opd[:, :, l])) for l=1:atmosphere.nlayers]
     l_plt = [plot!(l_ax[l], l_obs[l], colormap=PLOT_OPTIONS[:CMAP_WAVEFRONT]) for l=1:atmosphere.nlayers]
     [Colorbar(fig[1, 2*l+1], l_plt[l], width=10, height=Relative(3/4), labelsize=16, ticklabelsize=16) for l=1:atmosphere.nlayers]
     trim!(fig.layout)
@@ -100,7 +100,7 @@ end
 function update_layer_figure(opd, atmosphere, reconstruction)
     figs = reconstruction.figures
     for l=1:atmosphere.nlayers
-        figs.opd_obs[l][] = rotr90(opd[:, :, l] .* atmosphere.masks[:, :, l, 1])
+        figs.opd_obs[l][] = rotr90(opd[:, :, l])
         reset_limits!(figs.opd_ax[l])
     end
 end

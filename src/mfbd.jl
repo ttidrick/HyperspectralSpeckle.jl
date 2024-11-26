@@ -16,6 +16,7 @@ export calculate_composite_pupil_eff, calculate_composite_phase_eff!, calculate_
 ## observations
 include("observations.jl")
 export Filter, Detector, Observations
+export calculate_wfs_slopes
 
 ## object
 include("object.jl")
@@ -48,12 +49,12 @@ export ReconstructionFigures, plot_object, plot_layers, update_object_figure, up
 ## reconstruct
 include("reconstruct.jl")
 export Reconstruction, Helpers, PatchHelpers, gaussian_weighting, mixed_weighting, reconstruct_blind!, object_solve!, opd_solve!, height_solve!
-export ConstantSchedule, ReciprocalDecaySchedule
+export ConstantSchedule, LinearSchedule, ReciprocalSchedule
 
 ## utils
 include("utils.jl")
 export gettype, writefits, writefile, writeobject, readobject, readfile, readqe, readimages, readmasks, readfits, read_spectrum, vega_spectrum, solar_spectrum
-export gaussian_kernel, calculate_entropy, calculate_ssim, shift_and_add, fit_plane, crop, smooth_to_rmse!, bartlett_hann2d, super_gaussian, block_reduce!, block_reduce, block_replicate!, block_replicate
+export gaussian_kernel, calculate_entropy, calculate_ssim, shift_and_add, fit_plane, crop, smooth_to_rmse!, bartlett_hann2d, super_gaussian, block_reduce!, block_reduce, block_replicate!, block_replicate, stack2mosaic
 export setup_fft, setup_ifft, setup_conv, setup_corr, setup_autocorr, setup_operator_mul
 
 ## TOP SECRET!

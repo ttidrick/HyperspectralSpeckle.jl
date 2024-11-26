@@ -280,10 +280,13 @@ end
             tid = Threads.threadid()
             for n=1:observation.nsubaps
                 for np=1:patches.npatches
-                    for w=1:atmosphere.nλ
-                        pupil2psf!(psfs[:, :, np, n, t, w], psf_temp[:, :, tid], mask.masks[:, :, n, w], P[:, :, tid], p[:, :, tid], A[:, :, n, np, t, w], patches.ϕ_composite[:, :, np, t, w], observation.α, mask.scale_psfs[w], iffts[tid], refraction[dd, w])
+                    if sum(object.object .* patches.w[:, :, np]) > 0
+                        for w=1:atmosphere.nλ
+                            pupil2psf!(psfs[:, :, np, n, t, w], psf_temp[:, :, tid], mask.masks[:, :, n, w], P[:, :, tid], p[:, :, tid], A[:, :, n, np, t, w], patches.ϕ_composite[:, :, np, t, w], observation.α, mask.scale_psfs[w], iffts[tid], refraction[dd, w])
+                        end
+                        create_polychromatic_image!(observation.images[:, :, n, t], observation.monochromatic_images[:, :, n, t, :], image_temp_big[:, :, tid], patches.w[:, :, np], object_patch[:, :, tid], object.object, psfs[:, :, np, n, t, :], atmosphere.λ, atmosphere.Δλ)
+                        observation.images[:, :, n, t] .= max.(0.0, observation.images[:, :, n, t])
                     end
-                    create_polychromatic_image!(observation.images[:, :, n, t], observation.monochromatic_images[:, :, n, t, :], image_temp_big[:, :, tid], patches.w[:, :, np], object_patch[:, :, tid], object.object, psfs[:, :, np, n, t, :], atmosphere.λ, atmosphere.Δλ)
                 end
                 add_background!(observation.images[:, :, n, t], object.background_flux, FTYPE=FTYPE)
                 if noise == true
