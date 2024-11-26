@@ -34,10 +34,11 @@ mutable struct Helpers{T<:AbstractFloat}
     extractor_adj::Array{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}, 4}
     refraction::Matrix{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}}
     refraction_adj::Matrix{TwoDimensionalTransformInterpolator{T, LinearSpline{T, Flat}, LinearSpline{T, Flat}}}
-    ift::Vector{Function}
-    convolve::Vector{Function}
-    correlate::Vector{Function}
-    autocorr::Vector{Function}
+    ft::Vector{Vector{Function}}
+    ift::Vector{Vector{Function}}
+    convolve::Vector{Vector{Function}}
+    correlate::Vector{Vector{Function}}
+    autocorr::Vector{Vector{Function}}
     ϕ_full::Array{T, 3}
     ϕ_slice::Array{T, 3}
     ϕ_composite::Array{T, 3}
@@ -55,10 +56,11 @@ mutable struct Helpers{T<:AbstractFloat}
     Î_small::Vector{Array{T, 3}}
     r::Vector{Array{T, 3}}
     ω::Vector{Array{T, 3}}
-    M::Vector{Matrix{T}}
+    mask_acf::Vector{Matrix{T}}
     ϵ_threads::Vector{T}
     g_threads_obj::Array{T, 4}
     g_threads_opd::Array{T, 4}
+    g_threads_ϕ::Array{T, 5}
     containers_builddim_real::Array{T, 3}
     containers_builddim_cplx::Array{Complex{T}, 3}
     containers_sdim_real::Array{T, 3}
@@ -75,20 +77,27 @@ mutable struct Helpers{T<:AbstractFloat}
                      verb=true,
                      FTYPE=gettype(atmosphere))
         if verb == true
-            println(" |-> Creating fft/ifft plans and convolution/correlation plans")
+            println("Creating fft/ifft plans and convolution/correlation plans")
         end
         nλtotal = length(λtotal)
-        ifft_threads = [setup_ifft(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
-        conv_threads = [setup_conv(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
-        corr_threads = [setup_corr(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
-        autocorr_threads = [setup_autocorr(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+        fft_threads = Vector{Vector{Function}}(undef, ndatasets+1)
+        ifft_threads = Vector{Vector{Function}}(undef, ndatasets+1)
+        conv_threads = Vector{Vector{Function}}(undef, ndatasets+1)
+        corr_threads = Vector{Vector{Function}}(undef, ndatasets+1)
+        autocorr_threads = Vector{Vector{Function}}(undef, ndatasets+1)
+        fft_threads[1] = [setup_fft(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+        ifft_threads[1] = [setup_ifft(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+        conv_threads[1] = [setup_conv(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+        corr_threads[1] = [setup_corr(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+        autocorr_threads[1] = [setup_autocorr(build_dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
 
         nthreads = Threads.nthreads()
         if verb == true
-            println(" |-> Creating computation buffers for $(nthreads) threads")
+            println("Creating computation buffers for $(nthreads) threads")
         end
         ϵ_threads = zeros(FTYPE, nthreads)
         g_threads_opd = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, nthreads)
+        g_threads_ϕ = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, atmosphere.nλ, nthreads)
         g_threads_obj = zeros(FTYPE, build_dim, build_dim, object.nλ, nthreads)
         ϕ_full = zeros(FTYPE, atmosphere.dim, atmosphere.dim, nthreads)
         ϕ_slice = Array{FTYPE, 3}(undef, build_dim, build_dim, nthreads)
@@ -111,31 +120,35 @@ mutable struct Helpers{T<:AbstractFloat}
         ndatasets = length(observations)
         r = Vector{Array{FTYPE, 3}}(undef, ndatasets)
         ω = Vector{Array{FTYPE, 3}}(undef, ndatasets)
-        M = Vector{Matrix{FTYPE}}(undef, ndatasets)
+        mask_acf = Vector{Matrix{FTYPE}}(undef, ndatasets)
         Î_small = Vector{Array{FTYPE, 3}}(undef, ndatasets)
         containers_pdim_real = Vector{Array{FTYPE, 3}}(undef, ndatasets)
         containers_pdim_cplx = Vector{Array{Complex{FTYPE}, 3}}(undef, ndatasets)
 
         if verb == true
-            println(" |-> Creating punch-out and refraction interpolators/adjoints")
+            println("Creating punch-out and refraction interpolators/adjoints")
         end
         extractor = Array{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}, 4}(undef, ndatasets, observations[1].nepochs, atmosphere.nlayers, nλtotal)
         extractor_adj = Array{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}, 4}(undef, ndatasets, observations[1].nepochs, atmosphere.nlayers, nλtotal)
         refraction = Matrix{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}}(undef, ndatasets, nλtotal)
         refraction_adj = Matrix{TwoDimensionalTransformInterpolator{FTYPE, LinearSpline{FTYPE, Flat}, LinearSpline{FTYPE, Flat}}}(undef, ndatasets, nλtotal)
         for dd=1:ndatasets
+            fft_threads[dd+1] = [setup_fft(observations[dd].dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+            ifft_threads[dd+1] = [setup_ifft(observations[dd].dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+            conv_threads[dd+1] = [setup_conv(observations[dd].dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+            corr_threads[dd+1] = [setup_corr(observations[dd].dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+            autocorr_threads[dd+1] = [setup_autocorr(observations[dd].dim, FTYPE=FTYPE) for ~=1:Threads.nthreads()]
+
             r[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
             ω[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
-            M[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim)
-            M[dd][observations[dd].dim÷2+1, observations[dd].dim÷2+1] = 1
+            mask_acf[dd] = ones(FTYPE, observations[dd].dim, observations[dd].dim)
+            # mask_acf[dd][observations[dd].dim÷2+1 - observations[dd].dim÷4:observations[dd].dim÷2+1 + observations[dd].dim÷4, observations[dd].dim÷2+1 - observations[dd].dim÷4:observations[dd].dim÷2+1 + observations[dd].dim÷4] .= 1
+            mask_acf[dd][observations[dd].dim÷2+1, observations[dd].dim÷2+1] = 0
             Î_small[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
             containers_pdim_real[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, nthreads)
             containers_pdim_cplx[dd] = zeros(Complex{FTYPE}, observations[dd].dim, observations[dd].dim, nthreads)
             scaleby_wavelength = [observations[dd].detector.λ_nyquist / λtotal[w] for w=1:nλtotal]
-            # scaleby_height = 1 .- atmosphere.heights ./ object.height
-            scaleby_height = layer_scale_factors(atmosphere.heights, object.height)
-            # Dmeta = observations[dd].D .+ (object.fov/206265) .* (atmosphere.heights .* 1000)
-            # scaleby_height = Dmeta ./ observations[dd].D
+            scaleby_height = layer_scale_factors(atmosphere.heights, object.height)            
             Threads.@threads for w=1:nλtotal
                 refraction[dd, w] = create_refraction_operator(λtotal[w], atmosphere.λ_ref, observations[dd].ζ, observations[dd].detector.pixscale, build_dim, FTYPE=FTYPE)
                 refraction_adj[dd, w] = create_refraction_adjoint(λtotal[w], atmosphere.λ_ref, observations[dd].ζ, observations[dd].detector.pixscale, build_dim, FTYPE=FTYPE)
@@ -148,7 +161,7 @@ mutable struct Helpers{T<:AbstractFloat}
             end
         end
 
-        return new{FTYPE}(extractor, extractor_adj, refraction, refraction_adj, ifft_threads, conv_threads, corr_threads, autocorr_threads, ϕ_full, ϕ_slice, ϕ_composite, o_conv, o_corr, smoothing_kernel, k_conv, k_corr, P, p, c, d, d2, Î_big, Î_small, r, ω, M, ϵ_threads, g_threads_obj, g_threads_opd, containers_builddim_real, containers_builddim_cplx, containers_sdim_real, containers_sdim_cplx, containers_pdim_real, containers_pdim_cplx)
+        return new{FTYPE}(extractor, extractor_adj, refraction, refraction_adj, fft_threads, ifft_threads, conv_threads, corr_threads, autocorr_threads, ϕ_full, ϕ_slice, ϕ_composite, o_conv, o_corr, smoothing_kernel, k_conv, k_corr, P, p, c, d, d2, Î_big, Î_small, r, ω, mask_acf, ϵ_threads, g_threads_obj, g_threads_opd, g_threads_ϕ, containers_builddim_real, containers_builddim_cplx, containers_sdim_real, containers_sdim_cplx, containers_pdim_real, containers_pdim_cplx)
     end
 end
 
@@ -159,7 +172,7 @@ mutable struct PatchHelpers{T<:AbstractFloat}
     p::Array{Complex{T}, 5}
     function PatchHelpers(patches, observations, atmosphere, object; λtotal=atmosphere.λ, build_dim=size(object.object, 1), verb=true, FTYPE=gettype(atmosphere))
         if verb == true
-            println(" |-> Creating patch extractors and buffers")
+            println("Creating patch extractors and buffers")
         end
         nλtotal = length(λtotal)
         P = zeros(Complex{FTYPE}, build_dim, build_dim, patches.npatches, nλtotal, Threads.nthreads())
@@ -183,9 +196,14 @@ mutable struct Reconstruction{T<:AbstractFloat}
     Δλtotal::T
     ndatasets::Int64
     build_dim::Int64
+    wavefront_parameter::Symbol
+    minimization_scheme::Symbol
+    noise_model::Symbol
     weight_function::Function
+    fg_object::Function
     gradient_object::Function
-    gradient_opd::Function
+    fg_wf::Function
+    gradient_wf::Function
     niter_mfbd::Int64
     indx_boot::Vector{UnitRange{Int64}}
     niter_boot::Int64
@@ -214,13 +232,13 @@ mutable struct Reconstruction{T<:AbstractFloat}
             nλint=1,
             ndatasets=length(observations),
             build_dim=size(object.object, 1),
-            weight_function=gaussian_weighting,
-            gradient_object=gradient_object_gaussiannoise!,
-            gradient_opd=gradient_opd_gaussiannoise!,
+            wavefront_parameter=:phase,
+            minimization_scheme=:mle,
+            noise_model=:gaussian,
             niter_mfbd=10,
             indx_boot=[1:dd for dd=1:ndatasets],
             maxiter=10,
-            maxeval=Dict("object"=>100000, "opd"=>100000),
+            maxeval=Dict("object"=>100000, "wf"=>100000),
             grtol=1e-9,
             frtol=1e-9,
             xrtol=1e-9,
@@ -243,11 +261,29 @@ mutable struct Reconstruction{T<:AbstractFloat}
         Δλtotal = (nλtotal == 1) ? 1.0 : (λmax - λmin) / (nλtotal - 1)
         niter_boot = length(indx_boot)
         ϵ = zero(FTYPE)
+
+        weight_function = getfield(Main, Symbol("$(noise_model)_weighting"))
+        fg_object = getfield(Main, Symbol("fg_object_$(minimization_scheme)"))
+        gradient_object = getfield(Main, Symbol("gradient_object_$(minimization_scheme)_$(noise_model)noise!"))
+        fg_wf = getfield(Main, Symbol("fg_$(wavefront_parameter)_$(minimization_scheme)"))
+        gradient_wf = getfield(Main, Symbol("gradient_$(wavefront_parameter)_$(minimization_scheme)_$(noise_model)noise!"))
+        
         if verb == true
-            println("Setting up MFBD: $(nλ) wavelengths ($(nλint) integrated planes), $(niter_mfbd) iterations, $(ndatasets) data channels")
-            println(" |-> Noise weighting: $(weight_function), object gradient: $(gradient_object), opd gradient: $(gradient_opd)")
-            println(" |-> Max iterations: $(maxiter), Max evaluations (OPD): $(maxeval["opd"]), (object): $(maxeval["object"])")
-            println(" |-> Smoothing: $(smoothing) (schedule: $(fwhm_schedule), Max FWHM: $(maxFWHM), Min FWHM: $(minFWHM))")
+            print(Crayon(underline=true, foreground=(255, 215, 0), reset=true), "Reconstruction\n"); print(Crayon(reset=true))
+            println("\tImage build size: $(build_dim)×$(build_dim) pixels")
+            println("\tWavelength: $(minimum(λ))—$(maximum(λ)) nm")
+            println("\tNumber of wavelength: $(nλ)")
+            println("\tNumber of integrated wavelengths: $(nλint)")
+            println("\tNumber of data channels: $(ndatasets)")
+            println("\tWavefront Parameter: $(symbol2str[wavefront_parameter])")
+            println("\tNoise weighting: $(weight_function)")
+            println("\tObject gradient function: $(gradient_object)")
+            println("\tWavefront gradient function: $(gradient_wf)")
+            println("\tNumber of MFBD cycles: $(niter_mfbd)")
+            println("\tMax iterations: $(maxiter)") 
+            println("\tMax evaluations: $(maxeval["wf"]) (wf), $(maxeval["object"]) (object)")
+            println("\tSmoothing: $(smoothing) (schedule: $(fwhm_schedule), Max FWHM: $(maxFWHM), Min FWHM: $(minFWHM))")
+            println("\tStopping criteria: $(grtol) (grtol), $(frtol) (frtol), $(xrtol) (xrtol)")
         end
 
         if helpers == []
@@ -277,17 +313,14 @@ mutable struct Reconstruction{T<:AbstractFloat}
         end
 
         patches.A = Vector{Array{FTYPE, 6}}(undef, ndatasets)
-        patches.ϕ_slices = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[1].nepochs, atmosphere.nlayers, nλtotal)
-        patches.ϕ_composite = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[1].nepochs, nλtotal)
+        patches.phase_slices = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[1].nepochs, atmosphere.nlayers, nλtotal)
+        patches.phase_composite = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[1].nepochs, nλtotal)
         patches.psfs = Vector{Array{FTYPE, 6}}(undef, ndatasets)
-        patches.broadband_psfs = Vector{Array{FTYPE, 5}}(undef, ndatasets)
         for dd=1:ndatasets
             patches.A[dd] = ones(FTYPE, build_dim, build_dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs, nλtotal)
             patches.psfs[dd] = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs, nλ)
-            patches.broadband_psfs[dd] = zeros(FTYPE, observations[dd].dim, observations[dd].dim, patches.npatches, observations[dd].nsubaps, observations[dd].nepochs)
-            observations[dd].psfs = zeros(FTYPE, build_dim, build_dim, observations[dd].nsubaps, observations[dd].nepochs, nλ)
             observations[dd].model_images = zeros(FTYPE, observations[dd].dim, observations[dd].dim, observations[dd].nsubaps, observations[dd].nepochs)
-            observations[dd].w = findall((observations[dd].detector.filter.response .* observations[dd].detector.qe) .> 0)
+            observations[dd].w = findall((observations[dd].optics.response .* observations[dd].detector.qe) .> 0)
         end
 
         if mfbd_verb_level == "full"
@@ -303,18 +336,26 @@ mutable struct Reconstruction{T<:AbstractFloat}
         verb_levels = Dict("vm"=>vm, "vo"=>vo)
 
         figs = ReconstructionFigures()
-        figs.object_fig, figs.object_ax, figs.object_obs = plot_object(object, show=false)
-        figs.opd_fig, figs.opd_ax, figs.opd_obs = plot_layers(atmosphere, show=false)
-        if plot == true
-            display(GLMakie.Screen(), figs.object_fig)
-            display(GLMakie.Screen(), figs.opd_fig)
+        if wavefront_parameter == :phase_static
+            figs.static_phase_fig, figs.static_phase_ax, figs.static_phase_obs = plot_static_phase(observations, show=false)
+            if plot == true
+                display(GLMakie.Screen(), figs.static_phase_fig)
+            end
+        elseif wavefront_parameter in [:phase, :opd]
+            figs.object_fig, figs.object_ax, figs.object_obs = plot_object(object, show=false)
+            plot_layers = getfield(Main, Symbol("plot_$(symbol2str[wavefront_parameter])"))
+            figs.wf_fig, figs.wf_ax, figs.wf_obs = plot_layers(atmosphere, show=false)
+            if plot == true
+                display(GLMakie.Screen(), figs.object_fig)
+                display(GLMakie.Screen(), figs.wf_fig)
+            end
         end
-
+        
         if verb == true
             println("")
         end
 
-        return new{FTYPE}(λ, λtotal, nλ, nλint, nλtotal, Δλ, Δλtotal, ndatasets, build_dim, weight_function, gradient_object, gradient_opd, niter_mfbd, indx_boot, niter_boot, maxiter, ϵ, grtol, frtol, xrtol, maxeval, regularizers, smoothing, fwhm_schedule, helpers, patch_helpers, verb_levels, plot, figs)
+        return new{FTYPE}(λ, λtotal, nλ, nλint, nλtotal, Δλ, Δλtotal, ndatasets, build_dim, wavefront_parameter, minimization_scheme, noise_model, weight_function, fg_object, gradient_object, fg_wf, gradient_wf, niter_mfbd, indx_boot, niter_boot, maxiter, ϵ, grtol, frtol, xrtol, maxeval, regularizers, smoothing, fwhm_schedule, helpers, patch_helpers, verb_levels, plot, figs)
     end
 end
 
@@ -326,36 +367,14 @@ function mixed_weighting(entropy, image, rn)
     return 1 ./ (entropy .* (image .+ rn^2))
 end
 
-
-@views function object_solve!(reconstruction, observations, object, patches)
-    FTYPE = gettype(reconstruction)
-    reconstruction.ϵ = zero(FTYPE)  
-    crit_obj = (x, g) -> fg_object(x, g, observations, reconstruction, patches)
-    vmlmb!(crit_obj, object.object, lower=0, fmin=0, verb=reconstruction.verb_levels["vo"], maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["object"])
-end
-
-@views function opd_solve!(reconstruction, observations, atmosphere, object, masks, patches)
-    FTYPE = gettype(reconstruction)
-    reconstruction.ϵ = zero(FTYPE)
-    helpers = reconstruction.helpers
-    fill_object_subplanes!(helpers.object_full, object.object, reconstruction.nλ, reconstruction.nλobject, reconstruction.Δλ, reconstruction.Δλobject, reconstruction.nsubλ)    
-    absolute_iter = (b-1)*reconstruction.niter_boot + current_iter
-    update_hyperparams(reconstruction, absolute_iter)
-    preconvolve_smoothing(reconstruction)
-    preconvolve_object(reconstruction, patches, object)
-
-    crit_opd = (x, g) -> fg_opd(x, g, observations, atmosphere, masks, patches, reconstruction)
-    vmlmb!(crit_opd, atmosphere.opd, verb=reconstruction.verb_levels["vo"], mem=5, fmin=0, maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["opd"])
-end
-
-function reconstruct_blind!(reconstruction, observations, atmosphere, object, masks, patches; closeplots=true, write=false, folder="", id="")
+function reconstruct!(reconstruction, observations, atmosphere, object, masks, patches; closeplots=true, write=false, folder="", id="")
     FTYPE = gettype(reconstruction)
     for b=1:reconstruction.niter_boot
         current_observations = observations[reconstruction.indx_boot[b]]
         current_masks = masks[reconstruction.indx_boot[b]]
         reconstruction.ϵ = zero(FTYPE)
         for current_iter=1:reconstruction.niter_mfbd
-            absolute_iter = (b-1)*reconstruction.niter_mfbd + current_iter
+            absolute_iter = (b-1)*reconstruction.niter_mfbd + current_iter        
             update_hyperparams(reconstruction, absolute_iter)
             preconvolve_smoothing(reconstruction)
             preconvolve_object(reconstruction, patches, object)
@@ -373,23 +392,18 @@ function reconstruct_blind!(reconstruction, observations, atmosphere, object, ma
             end
 
             ## Reconstruct Phase
-            crit_opd = (x, g) -> fg_opd(x, g, current_observations, atmosphere, current_masks, patches, reconstruction)
-            vmlmb!(crit_opd, atmosphere.opd, verb=reconstruction.verb_levels["vo"], fmin=0, mem=5, maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["opd"])
-            update_layer_figure(atmosphere.opd, atmosphere, reconstruction)
+            crit_wf = (x, g) -> reconstruction.fg_wf(x, g, current_observations, atmosphere, current_masks, patches, reconstruction)
+            vmlmb!(crit_wf, getproperty(atmosphere, reconstruction.wavefront_parameter), verb=reconstruction.verb_levels["vo"], fmin=0, mem=5, maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["wf"])
+            update_layer_figure(atmosphere, reconstruction)
 
             ## Reconstruct Object
             if reconstruction.verb_levels["vm"] == true
                 print("--> object ")
             end
 
-            crit_obj = (x, g) -> fg_object(x, g, current_observations, reconstruction, patches)
+            crit_obj = (x, g) -> reconstruction.fg_object(x, g, current_observations, reconstruction, patches)
             vmlmb!(crit_obj, object.object, lower=0, fmin=0, verb=reconstruction.verb_levels["vo"], maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["object"])
-            update_object_figure(dropdims(mean(object.object, dims=3), dims=3), reconstruction)
-
-            # for l=1:atmosphere.nlayers
-            #     atmosphere.opd[:, :, l] .-= fit_plane(atmosphere.opd[:, :, l], atmosphere.masks[:, :, l]) .* atmosphere.masks[:, :, l]
-            # end
-            # atmosphere.opd .*= atmosphere.masks
+            update_object_figure(dropdims(sum(object.object, dims=3), dims=3), reconstruction)
 
             ## Compute final criterion
             if reconstruction.verb_levels["vm"] == true
@@ -399,8 +413,53 @@ function reconstruct_blind!(reconstruction, observations, atmosphere, object, ma
             if write == true
                 [writefits(observations[dd].model_images, "$(folder)/models_ISH$(observations[dd].nsubaps_side)x$(observations[dd].nsubaps_side)_recon$(id).fits") for dd=1:reconstruction.ndatasets]
                 writefits(object.object, "$(folder)/object_recon$(id).fits")
-                writefits(atmosphere.opd, "$(folder)/opd_recon$(id).fits")
+                writefits(getfield(atmosphere, reconstruction.wavefront_parameter), "$(folder)/$(symbol2str[reconstruction.wavefront_parameter])_recon$(id).fits")
                 writefile([reconstruction.ϵ], "$(folder)/recon$(id).dat")
+            end
+            GC.gc()
+        end
+    end
+
+    if closeplots == true
+        GLMakie.closeall()
+    end
+end
+
+function reconstruct_static_phase!(reconstruction, observations, atmosphere, object, masks, patches; closeplots=true, write=false, folder="", id="")
+    FTYPE = gettype(reconstruction)
+    for dd=1:reconstruction.ndatasets
+        reconstruction.ϵ = zero(FTYPE)
+        for current_iter=1:reconstruction.niter_mfbd
+            update_hyperparams(reconstruction, current_iter)
+            preconvolve_smoothing(reconstruction)
+            preconvolve_object(reconstruction, patches, object)
+
+            if reconstruction.verb_levels["vm"] == true
+                print("Channel: $(dd) Iter: $(current_iter) ")
+                if reconstruction.smoothing == true
+                    print("FWHM: $(reconstruction.fwhm_schedule(current_iter)) ")
+                end
+            end
+
+            ## Reconstruct complex pupil
+            if reconstruction.verb_levels["vm"] == true
+                print("--> Reconstructing static phase ")
+            end
+
+            ## Reconstruct Phase
+            crit_phase_static = (x, g) -> fg_phase_static(x, g, observations, atmosphere, masks, patches, reconstruction)
+            vmlmb!(crit_phase_static, observations[dd].phase_static, verb=reconstruction.verb_levels["vo"], fmin=0, mem=5, maxiter=reconstruction.maxiter, gtol=(0, reconstruction.grtol), ftol=(0, reconstruction.frtol), xtol=(0, reconstruction.xrtol), maxeval=reconstruction.maxeval["wf"])
+            update_static_phase_figure(atmosphere, reconstruction)
+
+            ## Compute final criterion
+            if reconstruction.verb_levels["vm"] == true
+                print("--> ϵ:\t$(reconstruction.ϵ)\n")
+            end
+
+            if write == true
+                writefits(observations[dd].model_images, "$(folder)/static_models_ISH$(observations[dd].nsubaps_side)x$(observations[dd].nsubaps_side)_recon$(id).fits")
+                writefits(observations[dd].phase_static, "$(folder)/static_phase_recon$(id).fits")
+                writefile([reconstruction.ϵ], "$(folder)/static_recon$(id).dat")
             end
             GC.gc()
         end
@@ -444,7 +503,7 @@ end
                 heights[order2fit[l]] = height_trials[l][h]
                 print("\tHeight: $(heights)\t")
                 change_heights!(patches, atmosphere, object, observations[end], masks[end], heights, reconstruction=reconstruction, verb=false)
-                reconstruct_blind!(reconstruction, observations, atmosphere, object, masks, patches, closeplots=false)
+                reconstruct!(reconstruction, observations, atmosphere, object, masks, patches, closeplots=false)
                 ϵ[l][h] = sum(reconstruction.ϵ[1])
                 println("ϵ: $(ϵ[l][h])")
                 atmosphere = deepcopy(atmosphere_original)
@@ -455,7 +514,7 @@ end
             change_heights!(patches, atmosphere, object, observations[end], masks[end], heights, reconstruction=reconstruction, verb=false)
         end
         println("Optimal Heights: $(heights)")
-        reconstruct_blind!(reconstruction, observations, atmosphere, object, masks, patches, closeplots=false)
+        reconstruct!(reconstruction, observations, atmosphere, object, masks, patches, closeplots=false)
         object_original = deepcopy(object)
         atmosphere_original = deepcopy(atmosphere)
         update_heights_figure(height_trials, ϵ, atmosphere, reconstruction)
@@ -490,7 +549,7 @@ function update_hyperparams(reconstruction, iter)
     regularizers = reconstruction.regularizers
     helpers = reconstruction.helpers
     regularizers.βo *= regularizers.βo_schedule(iter)
-    regularizers.βopd *= regularizers.βopd_schedule(iter)
+    regularizers.βwf *= regularizers.βwf_schedule(iter)
     fwhm = reconstruction.fwhm_schedule(iter)
     helpers.smoothing_kernel .= gaussian_kernel(reconstruction.build_dim, fwhm, FTYPE=FTYPE)
 end

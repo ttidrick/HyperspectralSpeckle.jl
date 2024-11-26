@@ -47,8 +47,11 @@ rn = 2.0
 exptime = 5e-3
 ζ = 0.0
 ########## Create Optical System ##########
-broadband_filter = OpticalElement(λ=λ, response=ones(FTYPE, nλ), FTYPE=FTYPE)
-optics = OpticalSystem([broadband_filter], λ, verb=verb, FTYPE=FTYPE)
+oap_full = repeat(OpticalElement(name="Thorlabs:OAP-P01", λ=λ, FTYPE=FTYPE), 2)
+mirrors_full = repeat(OpticalElement(name="Thorlabs:Plano-P01", λ=λ, FTYPE=FTYPE), 2)
+dichroic_full = OpticalElement(name="Thorlabs:DMLP805P-transmitted", λ=λ, FTYPE=FTYPE)
+lens_full = OpticalElement(name="Thorlabs:AB", λ=λ, FTYPE=FTYPE)
+optics_full = OpticalSystem(cat(oap_full..., mirrors_full..., dichroic_full, lens_full, dims=1), λ, verb=verb, FTYPE=FTYPE)
 ######### Create Full-Ap Detector #########
 detector_full = Detector(
     qe=qe,
@@ -63,7 +66,7 @@ detector_full = Detector(
 ### Create Full-Ap Observations object ####
 datafile = "$(folder)/Dr0_20_ISH1x1_images.fits"
 observations_full = Observations(
-    optics,
+    optics_full,
     detector_full,
     ζ=ζ,
     D=D,
@@ -71,6 +74,13 @@ observations_full = Observations(
     verb=verb,
     FTYPE=FTYPE
 )
+########## Create Optical System ##########
+oap_wfs = OpticalElement(name="Thorlabs:OAP-P01", λ=λ, FTYPE=FTYPE)
+mirrors_wfs = repeat(OpticalElement(name="Thorlabs:Plano-P01", λ=λ, FTYPE=FTYPE), 2)
+dichroic_wfs = OpticalElement(name="Thorlabs:DMLP805P-reflected", λ=λ, FTYPE=FTYPE)
+lens_wfs = repeat(OpticalElement(name="Thorlabs:AB", λ=λ, FTYPE=FTYPE), 3)
+mla_wfs = OpticalElement(name="Thorlabs:MLA", λ=λ, FTYPE=FTYPE)
+optics_wfs = OpticalSystem(cat(oap_wfs, mirrors_wfs..., dichroic_wfs, lens_wfs..., mla_wfs, dims=1), λ, verb=verb, FTYPE=FTYPE)
 # datafiles = [
 #     "$(folder)/Dr0_20_ISH1x1_images_400nm.fits",
 #     "$(folder)/Dr0_20_ISH1x1_images_550nm.fits",
