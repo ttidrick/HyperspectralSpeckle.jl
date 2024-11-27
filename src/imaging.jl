@@ -56,27 +56,27 @@ function create_refraction_adjoint(λ, λ_ref, ζ, pixscale, build_dim; FTYPE=Fl
     return refraction
 end
 
-function pupil2psf(mask, λ, λ_ref, ζ, A, ϕ, build_dim, α, scale_psf, pixscale; FTYPE=Float64)
+function pupil2psf(mask, λ, λ_ref, ζ, A, ϕ, build_dim, response, transmision, scale_psf, pixscale; FTYPE=Float64)
     P = zeros(FTYPE, build_dim, build_dim)
     p = zeros(Complex{FTYPE}, build_dim, build_dim)
     psf = zeros(FTYPE, build_dim, build_dim)
     psf_temp = zeros(FTYPE, build_dim, build_dim)
     refraction = create_refraction_operator(λ, λ_ref, ζ, pixscale, build_dim; FTYPE=FTYPE)
-    pupil2psf!(psf, psf_temp, mask, P, p, A, ϕ, α, scale_psf, FTYPE(build_dim), refraction)
+    pupil2psf!(psf, psf_temp, mask, P, p, A, ϕ, response, transmission, scale_psf, FTYPE(build_dim), refraction)
     return psf
 end
 
-function pupil2psf!(psf, psf_temp, mask, P, p, A, ϕ, α, scale_psf, scale_ifft::AbstractFloat, refraction)
+function pupil2psf!(psf, psf_temp, mask, P, p, A, ϕ, response, transmission, scale_psf, scale_ifft::AbstractFloat, refraction)
     P .= mask .* scale_psf .* A .* cis.(ϕ)
     p .= ift(P) .* scale_ifft
-    psf_temp .= α .* abs2.(p)
+    psf_temp .= transmission .* response .* abs2.(p)
     mul!(psf, refraction, psf_temp)
 end
 
-function pupil2psf!(psf, psf_temp, mask, P, p, A, ϕ, α, scale_psf, ifft_prealloc!::Function, refraction)
+function pupil2psf!(psf, psf_temp, mask, P, p, A, ϕ, response, transmission, scale_psf, ifft_prealloc!::Function, refraction)
     P .= mask .* scale_psf .* A .* cis.(ϕ)
     ifft_prealloc!(p, P)
-    psf_temp .= α .* abs2.(p)
+    psf_temp .= transmission .* response .* abs2.(p)
     mul!(psf, refraction, psf_temp)
 end
 
@@ -137,7 +137,6 @@ function create_polychromatic_image(object, psfs, λ, Δλ, dim; FTYPE=Float64)
 end
 
 # @views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 2}, image_big, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ)
-#     println("B")
 #     nλ = length(λ)
 #     for w=1:nλ
 #         create_monochromatic_image!(image_small, image_big, object[:, :, w], psfs[:, :, w])
@@ -147,7 +146,6 @@ end
 # end
 
 # @views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 2}, image_big, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ, conv_prealloc)
-#     println("C")
 #     nλ = length(λ)
 #     for w=1:nλ
 #         create_monochromatic_image!(image_small, image_big, object[:, :, w], psfs[:, :, w], conv_prealloc)
@@ -157,7 +155,6 @@ end
 # end
 
 @views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 2}, image_big, o_conv::AbstractVector{<:Function}, psfs, λ, Δλ)
-    # OPD solve step
     nλ = length(λ)
     for w=1:nλ
         create_monochromatic_image!(image_small, image_big, o_conv[w], psfs[:, :, w])
@@ -167,7 +164,6 @@ end
 end
 
 # @views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 3}, image_big, object, psfs, λ, Δλ)
-#     println("E")
 #     nλ = length(λ)
 #     for w=1:nλ
 #         create_monochromatic_image!(image_small[:, :, w], image_big, object[:, :, w], psfs[:, :, w])
@@ -177,7 +173,6 @@ end
 # end
 
 @views function create_polychromatic_image!(image, image_small::AbstractMatrix{<:AbstractFloat}, image_big, ω, object_patch, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ)
-    # Object solve step
     nλ = length(λ)
     for w=1:nλ
         object_patch .= ω .* object[:, :, w]
@@ -188,7 +183,6 @@ end
 end
 
 # @views function create_polychromatic_image!(image, image_small::AbstractMatrix{<:AbstractFloat}, image_big, ω, object_patch, object::AbstractMatrix{<:AbstractFloat}, psfs, λ, Δλ)
-#     println("G")
 #     nλ = length(λ)
 #     for w=1:nλ
 #         object_patch .= ω .* object
@@ -199,7 +193,6 @@ end
 # end
 
 @views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 3}, image_big, ω, object_patch, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ)
-    # Data generation step
     nλ = length(λ)
     for w=1:nλ
         object_patch .= ω .* object[:, :, w]
@@ -210,7 +203,6 @@ end
 end
 
 # @views function create_polychromatic_image!(image, image_small::AbstractMatrix{<:AbstractFloat}, image_big, ω, object_patch, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ, conv_prealloc)
-#     println("I")
 #     nλ = length(λ)
 #     for w=1:nλ
 #         object_patch .= ω .* object[:, :, w]
@@ -221,7 +213,6 @@ end
 # end
 
 # @views function create_polychromatic_image!(image, image_small::AbstractMatrix{<:AbstractFloat}, image_big, ω, object_patch, object::AbstractMatrix{<:AbstractFloat}, psfs, λ, Δλ, conv_prealloc)
-#     println("J")
 #     nλ = length(λ)
 #     for w=1:nλ
 #         object_patch .= ω .* object
@@ -232,7 +223,6 @@ end
 # end
 
 # @views function create_polychromatic_image!(image, image_small::AbstractArray{<:AbstractFloat, 3}, image_big, ω, object_patch, object::AbstractArray{<:AbstractFloat, 3}, psfs, λ, Δλ, conv_prealloc)
-#     println("K")
 #     nλ = length(λ)
 #     for w=1:nλ
 #         object_patch .= ω .* object[:, :, w]

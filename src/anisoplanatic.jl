@@ -6,10 +6,9 @@ mutable struct AnisoplanaticPatches{T<:AbstractFloat}  # Structure to store isop
     positions::Matrix{T} # Locations of the patch centers, relative to the image center
     w::Array{T, 3}                  # Windowing function
     A::Vector{Array{T, 6}}
-    ϕ_slices::Array{T, 6}
-    ϕ_composite::Array{T, 5}
+    phase_slices::Array{T, 6}
+    phase_composite::Array{T, 5}
     psfs::Vector{Array{T, 6}}
-    broadband_psfs::Vector{Array{T, 5}}
     @views function AnisoplanaticPatches(
             dim, 
             image_dim, 
@@ -23,12 +22,13 @@ mutable struct AnisoplanaticPatches{T<:AbstractFloat}  # Structure to store isop
             dim = image_dim
             overlap = 0    
         end
-
         npatches_side = dim==image_dim ? 1 : ceil(ITYPE, image_dim / (dim * (1 - overlap))) + 1
-        # npatches_side = round(ITYPE, image_dim / dim)
 
         if verb == true
-            println("Creating $(npatches_side)×$(npatches_side) patches ($(dim) pix) across source for anisoplanatic model")
+            print(Crayon(underline=true, foreground=(255, 215, 0), reset=true), "Efficient filter flow\n"); print(Crayon(reset=true))
+            println("\tSize: $(dim) pixels")
+            println("\tOverlap: $(overlap)")
+            println("\tNumber of patches: $(npatches_side)x$(npatches_side) patches")
         end
         
         npatches = npatches_side^2
@@ -134,26 +134,6 @@ end
     atmosphere.masks[atmosphere.masks .> 0] .= 1
 end
 
-# @views function calculate_layer_masks_iso!(atmosphere, observations_full, object, masks_full)
-#     FTYPE = gettype(atmosphere)
-#     scaleby_wavelength = atmosphere.λ_nyquist ./ atmosphere.λ
-#     # scaleby_height = 1 .- atmosphere.heights ./ object.height
-#     scaleby_height = layer_scale_factors(atmosphere.heights, object.height, observations_full.D, object.fov)
-#     atmosphere_masks = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, atmosphere.nλ, Threads.nthreads())
-#     Threads.@threads :static for t=1:observations_full.nepochs
-#         tid = Threads.threadid()
-#         for w=1:atmosphere.nλ
-#             for l=1:atmosphere.nlayers
-#                 center = Tuple(atmosphere.positions[:, t, l, w])
-#                 deextractor = create_extractor_adjoint(center, atmosphere.dim, observations_full.dim, scaleby_height[l], scaleby_wavelength[w], FTYPE=FTYPE)
-#                 atmosphere_masks[:, :, l, w, tid] .+= deextractor*masks_full.masks[:, :, 1, w]
-#             end
-#         end
-#     end
-#     atmosphere.masks = dropdims(sum(atmosphere_masks, dims=5), dims=5)
-#     atmosphere.masks[atmosphere.masks .> 0] .= 1
-# end
-
 @views function calculate_layer_masks_eff_alt!(atmosphere, observations_full, object, masks_full; verb=true)
     if verb == true
         println("Creating sausage masks for $(atmosphere.nlayers) layers at $(atmosphere.nλ) wavelengths")
@@ -171,30 +151,27 @@ end
     end
 end
 
-@views function calculate_composite_pupil_eff(patches, atmosphere, observations, object, masks; build_dim=observations.dim, propagate=true, verb=true)
+@views function calculate_composite_pupil_eff(patches, atmosphere, observations, object, masks; build_dim=observations.dim, verb=true)
     if verb == true
         println("Calculating composite complex pupil for $(length(observations)) channels")
     end
     FTYPE = gettype(atmosphere)
     ndatasets = length(observations)
     patches.A = Vector{Array{FTYPE, 6}}(undef, ndatasets)
-    patches.ϕ_slices = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[end].nepochs, atmosphere.nlayers, atmosphere.nλ)
-    patches.ϕ_composite = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[end].nepochs, atmosphere.nλ)
+    patches.phase_slices = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[end].nepochs, atmosphere.nlayers, atmosphere.nλ)
+    patches.phase_composite = zeros(FTYPE, build_dim, build_dim, patches.npatches, observations[end].nepochs, atmosphere.nλ)
     for dd=1:ndatasets
         patches.A[dd] = ones(FTYPE, build_dim, build_dim, observations[dd].nsubaps, patches.npatches, observations[dd].nepochs, atmosphere.nλ)
     end
 
-    # Dmeta = observations[end].D .+ (object.fov/206265) .* (atmosphere.heights .* 1000)
-    # scaleby_height = Dmeta ./ observations[end].D
-    # scaleby_height = 1 .- atmosphere.heights ./ object.height
     scaleby_height = layer_scale_factors(atmosphere.heights, object.height)
     scaleby_wavelength = atmosphere.λ_nyquist ./ atmosphere.λ
     extractors = create_patch_extractors(patches, atmosphere, observations[end], object, scaleby_wavelength, scaleby_height, build_dim=build_dim)
     if verb == true
         println("\tExtracting composite phase")
     end
-    calculate_composite_phase_eff!(patches.ϕ_composite, patches.ϕ_slices, patches, atmosphere, observations[end], masks[end], extractors)
-    if propagate == true
+    calculate_composite_phase_eff!(patches.phase_composite, patches.phase_slices, patches, atmosphere, observations[end], masks[end], extractors)
+    if atmosphere.propagate == true
         for dd=1:ndatasets
             if verb == true
                 println("\tExtracting composite amplitude for channel $(dd) by Fresnel propagation")
@@ -211,8 +188,11 @@ end
         for np=1:patches.npatches
             for w=1:atmosphere.nλ
                 for l=1:atmosphere.nlayers
-                    position2phase!(ϕ_slices[:, :, np, t, l, w], FTYPE(2pi) ./ atmosphere.λ[w] .* atmosphere.opd[:, :, l], extractors[t, np, l, w])
-                    # ϕ_slices[:, :, np, t, l, w] .*= masks.masks[:, :, 1, w]
+                    if atmosphere.common_opd == true
+                        position2phase!(ϕ_slices[:, :, np, t, l, w], FTYPE(2pi) ./ atmosphere.λ[w] .* atmosphere.opd[:, :, l], extractors[t, np, l, w])
+                    else
+                        position2phase!(ϕ_slices[:, :, np, t, l, w], atmosphere.phase[:, :, l, w], extractors[t, np, l, w])
+                    end
                     ϕ_composite[:, :, np, t, w] .+= ϕ_slices[:, :, np, t, l, w]
                 end
             end
@@ -226,8 +206,8 @@ end
         for np=1:patches.npatches
             for w=1:atmosphere.nλ
                 for n=1:observations.nsubaps
-                    ϕ_slices_subap = repeat(masks.masks[:, :, n, w], 1, 1, atmosphere.nlayers) .* patches.ϕ_slices[:, :, np, t, :, w]
-                    N = size(patches.ϕ_slices, 1)
+                    ϕ_slices_subap = repeat(masks.masks[:, :, n, w], 1, 1, atmosphere.nlayers) .* patches.phase_slices[:, :, np, t, :, w]
+                    N = size(patches.phase_slices, 1)
                     x1 = ((-N÷2:N÷2-1) .* atmosphere.sampling_nyquist_mperpix[1])' .* ones(N)
                     y1 = x1'
                     sg = repeat(exp.(-(x1 ./ (0.47*N)).^16) .* exp.(-(y1 ./ (0.47*N)).^16), 1, 1, atmosphere.nlayers)
@@ -282,7 +262,7 @@ end
                 for np=1:patches.npatches
                     if sum(object.object .* patches.w[:, :, np]) > 0
                         for w=1:atmosphere.nλ
-                            pupil2psf!(psfs[:, :, np, n, t, w], psf_temp[:, :, tid], mask.masks[:, :, n, w], P[:, :, tid], p[:, :, tid], A[:, :, n, np, t, w], patches.ϕ_composite[:, :, np, t, w], observation.α, mask.scale_psfs[w], iffts[tid], refraction[dd, w])
+                            pupil2psf!(psfs[:, :, np, n, t, w], psf_temp[:, :, tid], mask.masks[:, :, n, w], P[:, :, tid], p[:, :, tid], A[:, :, n, np, t, w], patches.phase_composite[:, :, np, t, w] .+ observation.phase_static[:, :, w], observation.optics.response[w], atmosphere.transmission[w], mask.scale_psfs[w], iffts[tid], refraction[dd, w])
                         end
                         create_polychromatic_image!(observation.images[:, :, n, t], observation.monochromatic_images[:, :, n, t, :], image_temp_big[:, :, tid], patches.w[:, :, np], object_patch[:, :, tid], object.object, psfs[:, :, np, n, t, :], atmosphere.λ, atmosphere.Δλ)
                         observation.images[:, :, n, t] .= max.(0.0, observation.images[:, :, n, t])
@@ -292,18 +272,21 @@ end
                 if noise == true
                     add_noise!(observation.images[:, :, n, t], observation.detector.rn, true, FTYPE=FTYPE)
                 end
+                observation.images[:, :, n, t] .= min.(observation.images[:, :, n, t], observation.detector.saturation)
             end
         end
     end
 end
 
 @views function change_heights!(patches, atmosphere, object, observations_full, masks_full, heights; reconstruction=[], verb=true)
+    if verb == true
+        println("Heights changed from $(atmosphere.heights) km to $(heights) km")
+    end
+    
     FTYPE = gettype(observations_full)
     original_heights = atmosphere.heights
     original_dim = atmosphere.dim
     original_sampling_nyquist_arcsecperpix = atmosphere.sampling_nyquist_arcsecperpix
-    # Dmeta0 = observations_full.D .+ (object.fov/206265) .* (original_heights .* 1000) 
-    # Dmeta = observations_full.D .+ (object.fov/206265) .* (heights .* 1000)
     atmosphere.heights = heights
     atmosphere.sampling_nyquist_arcsecperpix = layer_nyquist_sampling_arcsecperpix(observations_full.D, object.fov, heights, observations_full.dim)
 
@@ -311,8 +294,8 @@ end
     calculate_pupil_positions!(atmosphere, observations_full, verb=verb)
     calculate_layer_masks_eff!(patches, atmosphere, observations_full, object, masks_full, verb=verb)
     opd = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers)
+    # ϕ = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, atmosphere.nλ)
 
-    # scaleby_height = Dmeta ./ Dmeta0
     scaleby_height = original_sampling_nyquist_arcsecperpix ./ atmosphere.sampling_nyquist_arcsecperpix
     for l=1:atmosphere.nlayers
         kernel = LinearSpline(FTYPE)
@@ -321,13 +304,7 @@ end
         output_size = (Int64(atmosphere.dim), Int64(atmosphere.dim))
         full_transform = ((transform + (screen_size[1]÷2+1, screen_size[2]÷2+1)) * (1/scaleby_height[l])) - (atmosphere.dim÷2+1, atmosphere.dim÷2+1)
         scaler = TwoDimensionalTransformInterpolator(output_size, screen_size, kernel, full_transform)
-        # display(heatmap(rotr90(atmosphere.opd[:, :, l])))
-        # arc!(Point2f(original_dim÷2+1, original_dim÷2+1), (Dmeta0[l]/2) / atmosphere.sampling_nyquist_mperpix[l], -pi, pi)
-        # readline()
-        mul!(opd[:, :, l], scaler, atmosphere.opd[:, :, l])
-        # display(heatmap(rotr90(opd[:, :, l])))
-        # arc!(Point2f(atmosphere.dim÷2+1, atmosphere.dim÷2+1), (Dmeta[l]/2) / atmosphere.sampling_nyquist_mperpix[l], -pi, pi)
-        # readline()
+        mul!(opd[:, :, l], scaler, atmosphere.opd[:, :, l])            
     end
     atmosphere.opd = opd
     atmosphere.opd .*= atmosphere.masks[:, :, :, 1]
@@ -338,7 +315,7 @@ end
         if helpers != []
             helpers = reconstruction.helpers
             helpers.g_threads_opd = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, Threads.nthreads())
-            helpers.ϕ_full = zeros(FTYPE, atmosphere.dim, atmosphere.dim, Threads.nthreads())
+            helpers.phase_full = zeros(FTYPE, atmosphere.dim, atmosphere.dim, Threads.nthreads())
             helpers.containers_sdim_real = zeros(FTYPE, atmosphere.dim, atmosphere.dim, Threads.nthreads())
         end
 
