@@ -6,8 +6,7 @@ show_the_satellite()
 
 ############# Data Parameters #############
 FTYPE = Float32;
-# folder = "/home/dan/Desktop/JASS_2024/prime-95b/zenith0_noisy";
-folder = "data/test"
+folder = "/home/dan/Desktop/JASS_2024/prime-95b/monte_carlo";
 verb = true
 plot = true
 ###########################################
@@ -26,7 +25,7 @@ nλtotal = nλ * nλint
 Δλ = (nλ == 1) ? 1.0 : (λmax - λmin) / (nλ - 1)
 Δλtotal = (nλtotal == 1) ? 1.0 : (λmax - λmin) / (nλtotal - 1)
 ###########################################
-id = "_nlambda$(nλ)"
+id = "_1_nlambda$(nλ)_afterupdate"
 
 ########## Anisopatch Parameters ##########
 ## Unused but sets the size of the layer ##
@@ -43,32 +42,42 @@ fov = 8.0  # arcsec
 pixscale_full = fov / image_dim
 qefile = "data/qe/prime-95b_qe.dat"
 ~, qe = readqe(qefile, λ=λtotal)
+# qe = ones(FTYPE, nλtotal)
 rn = 2.0
 exptime = 5e-3
 ζ = 0.0
-########## Create Optical System ##########
-broadband_filter = OpticalElement(λ=λ, response=ones(FTYPE, nλ), FTYPE=FTYPE)
-optics = OpticalSystem([broadband_filter], λ, verb=verb, FTYPE=FTYPE)
-######### Create Full-Ap Detector #########
+######### Create Detector object ##########
+filter = Filter(filtername="broadband", λ=λtotal, FTYPE=FTYPE)
 detector_full = Detector(
     qe=qe,
     rn=rn,
     pixscale=pixscale_full,
-    λ=λ,
+    λ=λtotal,
     λ_nyquist=λ_nyquist,
     exptime=exptime,
-    verb=verb,
+    filter=filter,
     FTYPE=FTYPE
 )
+# detectors = [
+#     Detector(
+#         qe=qe,
+#         rn=rn,
+#         pixscale=pixscale_full,
+#         λ=λtotal,
+#         λ_nyquist=λ_nyquist,
+#         exptime=exptime,
+#         filter=Filter(λ=[λ[w]], response=[1.0], FTYPE=FTYPE),
+#         FTYPE=FTYPE 
+#     ) for w=1:nλtotal
+# ]
 ### Create Full-Ap Observations object ####
-datafile = "$(folder)/Dr0_20_ISH1x1_images.fits"
+datafile = "$(folder)/Dr0_20_ISH1x1_images_1.fits"
 observations_full = Observations(
-    optics,
     detector_full,
     ζ=ζ,
     D=D,
+    α=1.0,
     datafile=datafile,
-    verb=verb,
     FTYPE=FTYPE
 )
 # datafiles = [
@@ -121,17 +130,18 @@ object = Object(
     dim=observations[1].dim,
     FTYPE=FTYPE
 )
-all_subap_images = lucky_image(observations[1].images[:, :, 1, :], dims=3, q=0.9)
-object.object = repeat(all_subap_images, 1, 1, nλ)
-object.object ./= sum(object.object)
-object.object .*= mean(sum(observations[1].images, dims=(1, 2)), dims=(3, 4))
+# all_subap_images = lucky_image(observations[1].images[:, :, 1, :], dims=3, q=0.9)
+# object.object = repeat(all_subap_images, 1, 1, nλ)
+# object.object ./= sum(object.object)
+# object.object .*= mean(sum(observations[1].images, dims=(1, 2)), dims=(3, 4))
 # object.object = zeros(FTYPE, image_dim, image_dim, nλ)
-# nλ₀ = 101
-# λ₀ = (nλ₀ == 1) ? [mean([λmax, λmin])] : collect(range(λmin, stop=λmax, length=nλ₀))
-# Δλ₀ = (nλ₀ == 1) ? 1.0 : (λmax - λmin) / (nλ₀ - 1)
-# object.object = readfits("$(folder)/object_recon_nlambda1_restart.fits", FTYPE=FTYPE)
-# object.object = repeat(readfits("$(folder)/object_recon_nlambda1_restart_mixednoise.fits", FTYPE=FTYPE), 1, 1, nλ)  ./ (nλ * Δλ)
-# object.object = interpolate_object(readfits("$(folder)/object_recon_nlambda$(nλ₀)_restart.fits", FTYPE=FTYPE), λ₀, λ) .* (nλ₀/nλ) .* (Δλ₀/Δλ)
+nλ₀ = 10
+λ₀ = (nλ₀ == 1) ? [mean([λmax, λmin])] : collect(range(λmin, stop=λmax, length=nλ₀))
+Δλ₀ = (nλ₀ == 1) ? 1.0 : (λmax - λmin) / (nλ₀ - 1)
+# object.object = readfits("$(folder)/object_recon_nlambda10_deepsolve.fits", FTYPE=FTYPE)
+# object.object = repeat(readfits("$(folder)/object_recon_1_nlambda1.fits", FTYPE=FTYPE), 1, 1, nλ)  ./ (nλ * Δλ)
+object.object = interpolate_object(readfits("$(folder)/object_recon_1_nlambda$(nλ₀)_opdupdate.fits", FTYPE=FTYPE), λ₀, λ) .* (nλ₀/nλ) .* (Δλ₀/Δλ)
+# object.object .= repeat(object.object[:, :, end], 1, 1, nλ)
 ###########################################
 
 ########## Atmosphere Parameters ##########
@@ -161,8 +171,8 @@ calculate_screen_size!(atmosphere, observations[1], object, patches, verb=verb)
 calculate_pupil_positions!(atmosphere, observations[1], verb=verb)
 calculate_layer_masks_eff_alt!(atmosphere, observations[1], object, masks[1], verb=verb)
 # atmosphere.masks = ones(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers, atmosphere.nλ)
-atmosphere.opd = readfits("$(folder)/Dr0_20_opd_full.fits", FTYPE=FTYPE)
-# atmosphere.opd .*= atmosphere.masks[:, :, :, 1]
+atmosphere.opd = readfits("$(folder)/opd_recon_1_nlambda$(nλ₀)_opdupdate.fits", FTYPE=FTYPE)
+atmosphere.opd .*= atmosphere.masks[:, :, :, 1]
 # atmosphere.opd = zeros(FTYPE, atmosphere.dim, atmosphere.dim, atmosphere.nlayers)
 ###########################################
 
@@ -178,13 +188,13 @@ reconstruction = Reconstruction(
     nλint=nλint,
     niter_mfbd=1,
     # indx_boot=[1:nλ],
-    maxiter=10000,
+    maxiter=5000,
     # weight_function=mixed_weighting,
     # gradient_object=gradient_object_mixednoise!,
     # gradient_opd=gradient_opd_mixednoise!,
     maxeval=Dict("opd"=>1, "object"=>10000),
     smoothing=false,
-    grtol=1e-6,
+    grtol=1e-4,
     build_dim=image_dim,
     verb=verb,
     plot=plot,

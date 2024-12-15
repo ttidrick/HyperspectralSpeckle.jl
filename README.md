@@ -1,2 +1,2 @@
-# HyperspectralSpeckle.jl
-Simulate speckle images, perform multi-aperture phase retrieval, hyperspectral speckle imaging, etc.
+# MFBD.jl
+Multi-Frame Blind Deconvolution code for tomographic and broadband speckle image.

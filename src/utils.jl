@@ -3,16 +3,11 @@ using FITSIO
 using Statistics
 using FourierTools
 using DelimitedFiles
-using ZernikePolynomials
 import Interpolations: LinearInterpolation, Line
 
 
 function gettype(T)
     return typeof(T).parameters[1]
-end
-
-function gettypes(T)
-    return typeof(T).parameters
 end
 
 function writefits(x, filename; verb=true, header=nothing)
@@ -268,17 +263,17 @@ end
 
 function vega_spectrum(; λ=[])
     file = "data/alpha_lyr_stis_011.fits"
-    λ, flux = readspectrum(file, λ=λ)
+    λ, flux = read_spectrum(file, λ=λ)
     return λ, flux
 end
 
 function solar_spectrum(; λ=[])
     file = "data/sun_reference_stis_002.fits"
-    λ, flux = readspectrum(file, λ=λ)
+    λ, flux = read_spectrum(file, λ=λ)
     return λ, flux
 end
 
-function readspectrum(file; λ=[])
+function read_spectrum(file; λ=[])
     h = 6.626196e-27  # erg⋅s
     c = 2.997924562e17  # nm/s
 
@@ -290,12 +285,12 @@ function readspectrum(file; λ=[])
     flux .*= 10  # convert Å to nm [ph/s/m^2/nm]
 
     if λ == []
-        λ = λ₀
+        return λ₀, flux
     else
-        flux = interpolate1d(λ₀, flux, λ)
+        itp = interpolate((λ₀,), flux, Gridded(Linear()))
+        flux = itp(λ)
+        return λ, flux
     end
-
-    return λ, flux
 end
 
 function fourier_filter(x, r; FTYPE=Float64)
@@ -356,43 +351,40 @@ function setup_conv(dim; FTYPE=Float64)
     ift1 = setup_ifft(dim, FTYPE=FTYPE)
     container1 = Matrix{Complex{FTYPE}}(undef, dim, dim)
     container2 = Matrix{Complex{FTYPE}}(undef, dim, dim)
+    container3 = Matrix{Complex{FTYPE}}(undef, dim, dim)
     function conv!(out, in1, in2)
         ft1(container1, in1)
         ft2(container2, in2)
-        container1 .*= container2
-        ift1(out, container1)
+        container3 .= container1 .* container2
+        ift1(out, container3)
     end
 
     return conv!
 end
 
 function setup_corr(dim; FTYPE=Float64)
-    scale_corr = FTYPE(dim)
     ft1 = setup_fft(dim, FTYPE=FTYPE)
     ft2 = setup_fft(dim, FTYPE=FTYPE)
     ift1 = setup_ifft(dim, FTYPE=FTYPE)
     container1 = Matrix{Complex{FTYPE}}(undef, dim, dim)
     container2 = Matrix{Complex{FTYPE}}(undef, dim, dim)
+    container3 = Matrix{Complex{FTYPE}}(undef, dim, dim)
     function corr!(out, in1, in2)
         ft1(container1, in1)
         ft2(container2, in2)
-        container1 .*= conj.(container2)
-        ift1(out, container1)
+        container3 .= container1 .* conj.(container2)
+        ift1(out, container3)
     end
 
     return corr!
 end
 
 function setup_autocorr(dim; FTYPE=Float64)
-    ft1 = setup_fft(dim, FTYPE=FTYPE)
     ift1 = setup_ifft(dim, FTYPE=FTYPE)
-    container1 = Matrix{Complex{FTYPE}}(undef, dim, dim)
-    container2 = Matrix{FTYPE}(undef, dim, dim)
+    container = Matrix{Complex{FTYPE}}(undef, dim, dim)
     function autocorr!(out, in)
-        ift1(container1, in)
-        container2 .= abs2.(container1)
-        ft1(container1, container2)
-        out .= real.(container1)
+        ift1(container, in)
+        out .= abs2.(container)
     end
 
     return autocorr!
@@ -445,7 +437,7 @@ end
     return mosaic
 end
 
-@views function stack2mosaic(stack::AbstractArray{<:AbstractFloat, 3}, nside, ix)
+function stack2mosaic(stack::AbstractArray{<:AbstractFloat, 3}, nside, ix)
     ## 3d stack of images to 2d mosaic image
     FTYPE = eltype(stack)
     dim = size(stack, 1)
@@ -465,55 +457,4 @@ end
     end
 
     return mosaic
-end
-
-function create_zernike_screen(dim, radius, index, waves; FTYPE=Float64)
-    x = collect(-dim÷2:dim÷2-1) ./ radius
-    ϕz = evaluatezernike(x, x, [Noll(index)], [waves])
-    N = normalization(Noll(index))
-    ϕz .*= pi / N
-    return FTYPE.(ϕz)
-end
-
-function smooth_to_resolution(λ, F, resolution)
-    nλ = length(λ)
-    x = (1:nλ) .- (nλ÷2+1)
-    Δλ = mean(λ) / resolution
-    Δλ₀ = (maximum(λ) - minimum(λ)) / (nλ - 1)
-    fwhm = Δλ / Δλ₀
-    σ = fwhm / 2.35482
-    k = exp.(-x.^2 ./ σ^2)
-    k ./= sum(k)
-    F_smooth = conv_psf(F, k)
-    return F_smooth
-end
-
-function interpolate1d(x₀, y₀, x)
-    itp = LinearInterpolation(x₀, y₀, extrapolation_bc=Line())
-    y = itp(x)
-    return y
-end
-
-function readtransmission(filename; resolution=Inf, λ=[])
-    λtransmission, transmission = readfile(filename)
-    if resolution != Inf
-        transmission .= smooth_to_resolution(λtransmission, transmission, resolution)
-    end
-
-    if λ == []
-        λ = λtransmission
-    else
-        transmission = interpolate1d(λtransmission, transmission, λ)
-    end
-
-    return λ, transmission
-end
-
-function center_of_gravity(image)
-    dim = size(image, 1)
-    xx = ((1:dim) .- (dim÷2+1))' .* ones(dim)
-    yy = xx'
-    Δx = sum(xx .* image) / sum(image)
-    Δy = sum(yy .* image) / sum(image)
-    return Δx, Δy
 end

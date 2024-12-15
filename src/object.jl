@@ -21,46 +21,40 @@ mutable struct Object{T<:AbstractFloat}
             fov=0,
             height=0,
             spectrum=[0],
-            objectfile="", 
+            qe=[0],
+            objectfile="",
             template=false, 
             FTYPE=Float64,
             verb=true
         )
+        if verb == true
+            println("Creating $(dim)×$(dim) object at height $(height) km with $(fov)×$(fov) arcsec field of view")
+        end
         nλ = length(λ)
         Δλ = (nλ == 1) ? 1.0 : (maximum(λ) - minimum(λ)) / (nλ - 1)
         sampling_arcsecperpix = fov / dim
-        if objectfile != ""
-            if verb == true
-                print(Crayon(underline=true, foreground=(255, 215, 0), reset=true), "Object\n"); print(Crayon(reset=true))
-                println("\tSize: $(dim)x$(dim) pixels")
-                println("\tFOV: $(fov)×$(fov) arcsec")
-                println("\tHeight: $(height) km")
-                println("\tFlux: $(flux) ph")
-                println("\tBackground flux: $(background_flux) ph")
-                println("\tWavelength: $(minimum(λ))—$(maximum(λ)) nm")
-                println("\tNumber of wavelengths: $(length(λ))")
+        if (template == true) && (objectfile != "")
+            object, ~ = template2object(objectfile, dim, λ, FTYPE=FTYPE)
+            for w=1:nλ
+                object[:, :, w] .*= spectrum[w] * qe[w]
             end
-            if template == true
-                object, ~ = template2object(objectfile, dim, λ, FTYPE=FTYPE)
-            else
-                object = repeat(block_reduce(readfits(objectfile, FTYPE=FTYPE), dim), 1, 1, nλ)
+            object ./= sum(object)
+            # object .*= flux * (4445.01 / 1058.2726) / Δλ
+            object .*= flux / Δλ
+            return new{FTYPE}(λ, nλ, height, fov, sampling_arcsecperpix, spectrum, flux, background_flux, object)
+        elseif (template == false) && (objectfile != "")
+            object = block_reduce(readfits(objectfile, FTYPE=FTYPE), dim)
+            if (length(size(object)) == 2) && (nλ == 1)
+                object = repeat(object, 1, 1, 1)
             end
 
             for w=1:nλ
-                object[:, :, w] .*= spectrum[w]
+                object[:, :, w] .*= spectrum[w] * qe[w]
             end
             object ./= sum(object)
             object .*= flux / Δλ
             return new{FTYPE}(λ, nλ, height, fov, sampling_arcsecperpix, spectrum, flux, background_flux, object)
         else
-            if verb == true
-                print(Crayon(underline=true, foreground=(255, 215, 0), reset=true), "Object\n"); print(Crayon(reset=true))
-                println("\tSize: $(dim)x$(dim) pixels")
-                println("\tFOV: ($(fov)×$(fov)) arcsec")
-                println("\tHeight: $(height) km")
-                println("\tWavelength: $(minimum(λ))—$(maximum(λ)) nm")
-                println("\tNumber of wavelengths: $(length(λ))")
-            end
             return new{FTYPE}(λ, nλ, height, fov, sampling_arcsecperpix, spectrum)
         end
     end
@@ -75,16 +69,15 @@ function mag2flux(mag; D=3.6, ζ=0.0, exptime=20e-3, qe=0.7, adc_gain = 1.0, fil
     return adu 
 end
 
-function mag2flux(λ, spectrum, mag, filter; D=3.6, ζ=0.0, exptime=20e-3)
-    ## Flux at top of atmosphere
+function mag2flux(λ, spectrum, mag, detector; D=3.6, ζ=0.0, exptime=20e-3, adc_gain=1.0)
     area = pi*(D/2)^2
     airmass = sec(ζ*pi/180)
-    λfilter, filter_response = filter.λ, filter.response
+    λfilter, filter_response = detector.filter.λ, detector.filter.response
     nphotons_vega = magnitude_zeropoint(λfilter, filter_response);
     nphotons = nphotons_vega * 10^(-(mag+0.3*airmass)/2.5)
     scaled_spectrum = (spectrum ./ sum(spectrum)) .* nphotons
     # calculate number of ADU counts on the CCD from star, per wavelength
-    adu_λ = (exptime * area) .* scaled_spectrum
+    adu_λ = (adc_gain * exptime * area) .* detector.qe .* scaled_spectrum
     # calculate number of ADU counts on the CCD from star, total
     adu = length(λ) > 1 ? NumericalIntegration.integrate(λ, adu_λ) : adu_λ[1]
     return adu 

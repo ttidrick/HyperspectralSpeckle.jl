@@ -3,10 +3,9 @@ using Main.MFBD
 
 ############# Data Parameters #############
 FTYPE = Float32;
-# folder = "/home/dan/Desktop/JASS_2024/tests";
-folder = "data/test"
-id = ""
-verb = true
+folder = "/home/dan/Desktop/JASS_2024/prime-95b/monte_carlo";
+# folder = "data/test"
+id = "_1"
 ###########################################
 
 ##### Size, Timestep, and Wavelengths #####
@@ -14,7 +13,7 @@ image_dim = 512
 wfs_dim = 64
 
 nsubaps_side = 6
-nepochs = 1
+nepochs = 11
 nλ = 10
 λ_nyquist = 400.0
 λ_ref = 500.0
@@ -37,7 +36,7 @@ masks_full = Masks(
     FTYPE=FTYPE
 )
 maskfile = "$(folder)/ish_subaps_1x1$(id).fits"
-writefits(masks_full.masks, maskfile, header=header)
+# writefits(masks_full.masks, maskfile, header=header)
 masks = [masks_full]
 ###########################################
 
@@ -54,8 +53,6 @@ exptime = 5e-3
 noise = true
 ζ = 0.0
 ########## Create Optical System ##########
-broadband_filter = OpticalElement(λ=λ, response=ones(FTYPE, nλ), FTYPE=FTYPE)
-optics = OpticalSystem([broadband_filter], λ, verb=verb, FTYPE=FTYPE)
 ######### Create Full-Ap Detector #########
 detector_full = Detector(
     qe=qe,
@@ -64,19 +61,18 @@ detector_full = Detector(
     λ=λ,
     λ_nyquist=λ_nyquist,
     exptime=exptime,
-    verb=verb,
+    filter=Filter(filtername="broadband", λ=λ, FTYPE=FTYPE),
     FTYPE=FTYPE
 )
 ### Create Full-Ap Observations object ####
 observations_full = Observations(
-    optics,
     detector_full,
     ζ=ζ,
     D=D,
     nepochs=nepochs,
     nsubaps=1,
+    α=1.0,
     dim=image_dim,
-    verb=verb,
     FTYPE=FTYPE
 )
 observations = [observations_full]
@@ -85,12 +81,16 @@ observations = [observations_full]
 ############ Object Parameters ############
 objectfile = "data/sat_template2.fits"
 ~, spectrum = solar_spectrum(λ=λ)
+# spectrum = ones(FTYPE, nλ)
 template = true
 mag = 4.0
-background_mag = FTYPE(Inf)
-flux = mag2flux(λ, spectrum, mag, broadband_filter, D=D, ζ=ζ, exptime=exptime)
-background_flux = mag2flux(λ, ones(nλ), background_mag, broadband_filter, D=D, ζ=ζ, exptime=exptime)
+# background_mag = FTYPE(Inf)
+flux = mag2flux(λ, spectrum, mag, detector_full, D=D, ζ=ζ, exptime=exptime)
+# background_flux = mag2flux(λ, ones(nλ), background_mag, observations_full.detector, D=D, ζ=ζ, exptime=exptime)
+background_flux = 0.0
 object_height = 515.0  # km
+# object_size = 13.0  # m
+# fov = 206265 * object_size / (object_height*1e3)
 ############## Create object ##############
 object = Object(
     flux=flux,
@@ -100,12 +100,12 @@ object = Object(
     height=object_height, 
     dim=image_dim,
     spectrum=spectrum,
+    qe=qe,
     objectfile=objectfile, 
     template=template,
-    verb=verb,
     FTYPE=FTYPE
 )
-writefits(object.object, "$(folder)/hyperspectral_sat.fits", header=header)
+# writefits(object.object, "$(folder)/hyperspectral_sat.fits", header=header)
 ###########################################
 
 ########## Anisopatch Parameters ##########
@@ -153,7 +153,7 @@ calculate_screen_size!(atmosphere, observations_full, object, patches)
 calculate_pupil_positions!(atmosphere, observations_full)
 calculate_layer_masks_eff_alt!(atmosphere, observations[end], object, masks[end])
 create_phase_screens!(atmosphere, observations_full)
-# opd_smooth = calculate_smoothed_opd(atmosphere, observations_full)
+opd_smooth = calculate_smoothed_opd(atmosphere, observations_full, 0.35)
 calculate_composite_pupil_eff(patches, atmosphere, observations, object, masks, build_dim=image_dim, propagate=propagate)
 atmosphere.opd .*= atmosphere.masks[:, :, :, 1]
 
@@ -164,7 +164,7 @@ atmosphere.opd .*= atmosphere.masks[:, :, :, 1]
 # writefits(patches.ϕ_slices, "$(folder)/Dr0_$(Dr0_composite)_phase_slices$(id).fits", header=header)
 # writefits(patches.ϕ_composite, "$(folder)/Dr0_$(Dr0_composite)_phase_composite$(id).fits", header=header)
 writefits(atmosphere.opd, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full$(id).fits")
-# writefits(opd_smooth, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full_smooth$(id).fits")
+writefits(opd_smooth, "$(folder)/Dr0_$(round(Int64, Dr0_composite))_opd_full_smooth$(id).fits")
 ###########################################
 
 ########## Create Full-Ap images ##########
